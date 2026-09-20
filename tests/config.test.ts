@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -121,12 +121,16 @@ test("Untrusted project configuration is not read", async () => {
   }
 });
 
-test("Repository profiles define configured agent roles", async () => {
-  const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-empty-agent-"));
+test("Example profiles define configured agent roles", async () => {
+  const source = await readFile(
+    join(process.cwd(), "examples", "subagents.yaml"),
+    "utf8",
+  );
+  const files = await configuration(undefined, source);
   try {
     const loaded = await loadAgentProfiles({
-      cwd: process.cwd(),
-      agentDir,
+      cwd: files.cwd,
+      agentDir: files.agentDir,
       projectTrusted: true,
     });
     assert.deepEqual(
@@ -176,7 +180,7 @@ test("Repository profiles define configured agent roles", async () => {
       ],
     );
   } finally {
-    await rm(agentDir, { recursive: true, force: true });
+    await files.close();
   }
 });
 

@@ -8,7 +8,7 @@ model, thinking level, context use, recent tool activity, and state.
 ## Quickstart
 
 ```console
-pi -e .
+pi -e ./extensions/pi-subagents/index.ts
 ```
 
 Use the `subagent` tool with an agent name and task. Profiles load from
@@ -16,7 +16,8 @@ Use the `subagent` tool with an agent name and task. Profiles load from
 `.pi/subagents.yaml`. Project profiles override user profiles with the same
 name.
 
-The repository configuration defines `scout`, `pi-scout`, `research`,
-`worker`, and `review`. The Claude worker can call its delegated roles through an authenticated
-MCP server owned by the original Pi session. The original session retains all
-runs and their parent-child relationships.
+`examples/subagents.yaml` demonstrates `scout`, `pi-scout`, `research`,
+`worker`, and `review`. Copy and adapt it for a project or user configuration.
+The Claude worker can call its delegated roles through an authenticated MCP
+server owned by the original Pi session. The original session retains all runs
+and their parent-child relationships.

@@ -19,19 +19,90 @@
         system,
         ...
       }: let
+        inherit (pkgs) lib;
         agents = inputs.llm-agents.packages.${system};
+        manifest = lib.importJSON ./package.json;
+        lock = lib.importJSON ./package-lock.json;
+        runtimeManifest = builtins.removeAttrs manifest ["devDependencies"];
+        runtimePackages = lib.filterAttrs (name: package:
+          name == "" || !(package.dev or false))
+        lock.packages;
+        runtimeLock =
+          lock
+          // {
+            packages =
+              runtimePackages
+              // {
+                "" = builtins.removeAttrs runtimePackages."" ["devDependencies"];
+              };
+          };
+        runtimeNpmRoot = pkgs.runCommand "pi-subagents-npm-root" {} ''
+          mkdir -p "$out"
+          cp ${pkgs.writeText "package.json" (builtins.toJSON runtimeManifest)} \
+            "$out/package.json"
+          cp ${pkgs.writeText "package-lock.json" (builtins.toJSON runtimeLock)} \
+            "$out/package-lock.json"
+        '';
+        nodejs = pkgs.nodejs_24;
+        nodeModules = pkgs.importNpmLock.buildNodeModules {
+          npmRoot = runtimeNpmRoot;
+          inherit nodejs;
+
+          derivationArgs = {
+            pname = "pi-subagents-node-modules";
+            version = manifest.version;
+            npmFlags = ["--legacy-peer-deps" "--omit=dev"];
+          };
+        };
+        piSubagents =
+          pkgs.runCommand "pi-subagents-${manifest.version}" {
+            passthru = {
+              inherit nodeModules;
+              version = manifest.version;
+              agentProfiles = ./examples/subagents.yaml;
+            };
+          } ''
+            mkdir -p "$out"
+            cp -R ${./extensions} "$out/extensions"
+            cp -R ${./examples} "$out/examples"
+            cp ${./package.json} "$out/package.json"
+            cp ${./README.md} "$out/README.md"
+            ln -s ${nodeModules}/node_modules "$out/node_modules"
+          '';
       in {
         formatter = pkgs.alejandra;
 
+        packages = {
+          default = piSubagents;
+          pi-subagents = piSubagents;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [
-            pkgs.nodejs_24
+            nodejs
             agents.pi
             agents.claude-code
           ];
         };
 
         checks = {
+          package =
+            pkgs.runCommand "pi-subagents-package" {
+              nativeBuildInputs = [nodejs pkgs.jq];
+            } ''
+              root=${piSubagents}
+              test -f "$root/package.json"
+              entry=$(jq -r '.pi.extensions[0]' "$root/package.json")
+              test -f "$root/''${entry#./}"
+              test -f ${piSubagents.agentProfiles}
+              test -d "$root/node_modules/@modelcontextprotocol/sdk"
+              test -d "$root/node_modules/yaml"
+              test -d "$root/node_modules/zod"
+              node --experimental-strip-types --input-type=module -e \
+                "await import('$root/extensions/pi-subagents/mcp.ts')"
+              touch "$out"
+            '';
+
           format =
             pkgs.runCommand "pi-subagents-format" {
               nativeBuildInputs = [pkgs.alejandra];

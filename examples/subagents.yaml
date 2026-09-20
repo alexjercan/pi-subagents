@@ -1,0 +1,88 @@
+agents:
+  scout:
+    description: Gather focused codebase context for implementation agents.
+    harness: claude
+    model: haiku
+    thinking: medium
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+    system: |
+      Gather focused information from the project for another agent.
+      Inspect only the area required by the task.
+      Do not modify files.
+      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Keep the report concise and implementation-oriented.
+
+  pi-scout:
+    description: Gather focused codebase context using the Pi harness.
+    harness: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: medium
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+    system: |
+      Gather focused information from the project for another agent.
+      Inspect only the area required by the task.
+      Do not modify files.
+      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Keep the report concise and implementation-oriented.
+
+  research:
+    description: Research external topics and current information on the web.
+    harness: claude
+    model: haiku
+    thinking: medium
+    tools:
+      - web_search
+      - web_fetch
+    system: |
+      Research the requested topic on the web.
+      Use web search to find relevant primary and authoritative sources.
+      Fetch the useful sources and compare their claims.
+      Return a concise synthesis with source URLs, important details, and uncertainties.
+      Do not inspect or modify project files.
+
+  worker:
+    description: Implement a task using focused context gathered by scouts and verified by review.
+    harness: claude
+    model: opus
+    thinking: high
+    delegates:
+      - scout
+      - research
+      - review
+    system: |
+      Implement the requested change.
+      Before implementation, use mcp__pi_subagents__spawn to delegate focused code research to scouts.
+      Spawn as many scouts as needed and give each one a distinct part of the codebase or question to investigate.
+      When the task needs external knowledge or current information, use mcp__pi_subagents__spawn to ask research to investigate the topic on the web.
+      Use the delegated reports as your initial context.
+      Do not repeat broad project discovery yourself.
+      Inspect additional files only when implementation requires it.
+      Run the relevant checks.
+      When implementation is complete, use mcp__pi_subagents__spawn to ask review to verify the task and code.
+      Address actionable review findings before reporting the completed change.
+
+  review:
+    description: Verify that a task is complete and that the implementation is correct.
+    harness: claude
+    model: sonnet
+    thinking: medium
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+      - bash
+    system: |
+      Review the implementation against the requested task.
+      Check correctness, regressions, tests, failure behavior, and maintainability.
+      Run relevant checks when needed.
+      Report findings with concrete paths and evidence.
+      Do not modify the implementation.

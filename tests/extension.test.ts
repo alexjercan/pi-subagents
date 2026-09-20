@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +27,20 @@ interface RegisteredTool {
 
 test("Extension shows active runs in a widget and clears it after completion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
+  const project = join(directory, "project");
+  await mkdir(join(project, ".pi"), { recursive: true });
+  await writeFile(
+    join(project, ".pi", "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    tools: [read, grep, find, ls]
+    system: Inspect the project.
+`,
+  );
   const claude = join(directory, "claude");
   await writeFile(
     claude,
@@ -57,7 +71,7 @@ setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "
   } as unknown as ExtensionAPI;
   const widgets: unknown[] = [];
   const context: TestContext = {
-    cwd: process.cwd(),
+    cwd: project,
     mode: "tui",
     isProjectTrusted: () => true,
     ui: {
