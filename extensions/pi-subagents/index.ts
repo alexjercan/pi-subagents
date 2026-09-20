@@ -48,6 +48,8 @@ function errorResult(
 }
 
 export default function piSubagents(pi: ExtensionAPI): void {
+  if (process.env.PI_SUBAGENTS_MCP_URL) return;
+
   let runtime: AgentRuntime | undefined;
   let widgetRuns: AgentRunSnapshot[] = [];
   let widgetTimer: NodeJS.Timeout | undefined;

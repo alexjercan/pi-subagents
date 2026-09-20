@@ -53,6 +53,28 @@ async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
+test("Delegated Pi children leave subagent tools to the bridge", () => {
+  const previousUrl = process.env.PI_SUBAGENTS_MCP_URL;
+  process.env.PI_SUBAGENTS_MCP_URL = "http://127.0.0.1:1/mcp";
+  let handlers = 0;
+  let tools = 0;
+  try {
+    piSubagents({
+      on() {
+        handlers += 1;
+      },
+      registerTool() {
+        tools += 1;
+      },
+    } as unknown as ExtensionAPI);
+  } finally {
+    if (previousUrl === undefined) delete process.env.PI_SUBAGENTS_MCP_URL;
+    else process.env.PI_SUBAGENTS_MCP_URL = previousUrl;
+  }
+  assert.equal(handlers, 0);
+  assert.equal(tools, 0);
+});
+
 test("Root delegation terminates its turn and wakes after the active cohort", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
   const project = join(directory, "project");
