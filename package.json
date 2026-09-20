@@ -6,8 +6,13 @@
   "keywords": [
     "pi-package"
   ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-subagents/index.ts"
+    ]
+  },
   "scripts": {
-    "check": "npm test && npm run format:check",
+    "check": "npm run typecheck && npm test && npm run format:check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test",
