@@ -107,6 +107,7 @@ process.stdin.once("data", (chunk) => {
     },
   } as unknown as ExtensionAPI;
   const widgets: unknown[] = [];
+  const inputs: Array<{ title: string; placeholder: string }> = [];
   const context: TestContext = {
     cwd: project,
     mode: "tui",
@@ -115,7 +116,10 @@ process.stdin.once("data", (chunk) => {
       setWidget(_name, value) {
         widgets.push(value);
       },
-      input: async () => "answer",
+      input: async (title, placeholder) => {
+        inputs.push({ title, placeholder });
+        return "answer";
+      },
     },
   };
 
@@ -128,6 +132,21 @@ process.stdin.once("data", (chunk) => {
       "subagent_message",
     ]);
     await handlers.get("session_start")?.({}, context);
+    const askTool = tools.get("subagent_ask");
+    assert.ok(askTool);
+    await askTool.execute(
+      "ask-call",
+      { prompt: "Which topic?" },
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    assert.deepEqual(inputs, [
+      {
+        title: "Subagent asks: Which topic?",
+        placeholder: "Type your answer",
+      },
+    ]);
     const tool = tools.get("subagent");
     assert.ok(tool);
     const slow = await tool.execute(

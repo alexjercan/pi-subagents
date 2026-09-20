@@ -52,7 +52,10 @@ export default function piSubagents(pi: ExtensionAPI): void {
   let widgetRuns: AgentRunSnapshot[] = [];
   let widgetTimer: NodeJS.Timeout | undefined;
   let clearWidget = () => undefined;
-  let askUser: ((prompt: string) => Promise<string | undefined>) | undefined;
+  let questionQueue = Promise.resolve();
+  let askUser:
+    | ((title: string, placeholder: string) => Promise<string | undefined>)
+    | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
     const refreshWidget = () => {
@@ -81,11 +84,27 @@ export default function piSubagents(pi: ExtensionAPI): void {
       widgetRuns = [];
       if (ctx.mode === "tui") ctx.ui.setWidget("pi-subagents", undefined);
     };
-    askUser = (prompt) => ctx.ui.input("Subagent question", prompt);
+    questionQueue = Promise.resolve();
+    askUser = (title, placeholder) => {
+      const question = questionQueue.then(() =>
+        ctx.ui.input(title, placeholder),
+      );
+      questionQueue = question.then(
+        () => undefined,
+        () => undefined,
+      );
+      return question;
+    };
     runtime = await createAgentRuntime({
       cwd: ctx.cwd,
       projectTrusted: ctx.isProjectTrusted(),
       onUpdate: setWidget,
+      onRootQuestion(id, prompt) {
+        return (
+          askUser?.(`${id} asks: ${prompt}`, "Type your answer") ??
+          Promise.reject(new Error("Question UI is not available"))
+        );
+      },
       onRootMessage(message) {
         pi.sendMessage(
           {
@@ -103,6 +122,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
     const current = runtime;
     runtime = undefined;
     askUser = undefined;
+    questionQueue = Promise.resolve();
     clearWidget();
     clearWidget = () => undefined;
     await current?.close();
@@ -246,7 +266,10 @@ export default function piSubagents(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params) {
       if (!askUser) return errorResult("Subagent runtime is not running");
-      const answer = await askUser(params.prompt);
+      const answer = await askUser(
+        `Subagent asks: ${params.prompt}`,
+        "Type your answer",
+      );
       if (answer === undefined) return errorResult("Question was cancelled");
       return {
         content: [{ type: "text", text: answer }],

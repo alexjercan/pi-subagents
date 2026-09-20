@@ -95,6 +95,7 @@ export interface AgentRuntime {
 export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
   onRootMessage?: (message: string) => void | Promise<void>;
+  onRootQuestion?: (id: string, prompt: string) => Promise<string | undefined>;
 }
 
 interface PendingQuestion {
@@ -168,15 +169,6 @@ export async function createAgentRuntime(
     questions.get(runId)?.reject(new Error("Agent was cancelled"));
     questions.delete(runId);
     active.get(runId)?.stop();
-  };
-  const notifyOwner = async (snapshot: AgentRunSnapshot, message: string) => {
-    if (snapshot.parentRunId) {
-      const owner = active.get(snapshot.parentRunId);
-      if (!owner) throw new Error(`Owner of ${snapshot.id} is not running`);
-      await owner.send(message);
-      return;
-    }
-    await options.onRootMessage?.(message);
   };
   const profiles = () => loadAgentProfiles(options);
   const allowedProfiles = async (ownerRunId?: string) => {
@@ -262,32 +254,42 @@ export async function createAgentRuntime(
       rejectQuestion = reject;
       questions.set(runId, { resolve, reject });
     });
-    const abort = () => {
+    const rejectPending = (error: Error) => {
+      if (!questions.has(runId)) return;
       questions.delete(runId);
       snapshot.question = undefined;
       if (active.has(runId)) snapshot.status = "running";
-      rejectQuestion(new Error("Question was cancelled"));
+      rejectQuestion(error);
       emit();
     };
+    const abort = () => rejectPending(new Error("Question was cancelled"));
     if (signal.aborted) {
       abort();
       throw new Error("Question was cancelled");
     }
     signal.addEventListener("abort", abort, { once: true });
-    try {
-      await notifyOwner(
-        snapshot,
-        `Subagent ${snapshot.id} asks: ${prompt}\nAnswer with subagent_message using id ${JSON.stringify(snapshot.id)}.`,
-      );
-      return await answer;
-    } catch (error) {
-      if (questions.get(runId)) {
-        questions.delete(runId);
-        snapshot.question = undefined;
-        if (active.has(runId)) snapshot.status = "running";
-        emit();
+    if (!snapshot.parentRunId) {
+      const onRootQuestion = options.onRootQuestion;
+      if (!onRootQuestion) {
+        rejectPending(new Error("Root question handler is not available"));
+      } else {
+        void onRootQuestion(snapshot.id, prompt)
+          .then(async (value) => {
+            if (value === undefined) {
+              rejectPending(new Error("Question was cancelled"));
+              return;
+            }
+            await message(undefined, snapshot.id, value);
+          })
+          .catch((error) =>
+            rejectPending(
+              error instanceof Error ? error : new Error(String(error)),
+            ),
+          );
       }
-      throw error;
+    }
+    try {
+      return await answer;
     } finally {
       signal.removeEventListener("abort", abort);
     }

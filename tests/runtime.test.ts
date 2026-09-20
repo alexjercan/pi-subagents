@@ -155,7 +155,7 @@ process.stdin.on("data", async (chunk) => {
   }
 });
 
-test("A subagent question waits for its direct owner's message", async () => {
+test("A root subagent question is answered directly by the user", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-ask-"));
   const agentDir = join(root, "agent");
   const cwd = join(root, "project");
@@ -205,13 +205,18 @@ process.stdin.once("data", async () => {
   await chmod(claude, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${previousPath ?? ""}`;
-  const rootMessages: string[] = [];
+  const rootQuestions: Array<{ id: string; prompt: string }> = [];
+  let answerQuestion: (answer: string) => void = () => undefined;
+  const answer = new Promise<string>((resolve) => {
+    answerQuestion = resolve;
+  });
   const runtime = await createAgentRuntime({
     cwd,
     agentDir,
     projectTrusted: false,
-    onRootMessage: async (message) => {
-      rootMessages.push(message);
+    onRootQuestion: async (id, prompt) => {
+      rootQuestions.push({ id, prompt });
+      return answer;
     },
   });
   try {
@@ -229,8 +234,10 @@ process.stdin.once("data", async () => {
       /Duplicate directly owned subagent id/,
     );
     await until(() => runtime.list()[0]?.status === "waiting");
-    assert.match(rootMessages[0] ?? "", /Which API\?/);
-    await runtime.message(undefined, "implementation", "Use the stable API");
+    assert.deepEqual(rootQuestions, [
+      { id: "implementation", prompt: "Which API?" },
+    ]);
+    answerQuestion("Use the stable API");
     await until(() => runtime.list()[0]?.status === "completed");
     assert.equal(runtime.list()[0]?.result?.finalText, "Use the stable API");
   } finally {

@@ -90,6 +90,12 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
     name: "subagent_ask",
     label: "Subagent Ask",
     description: "Ask the direct owner a question and wait for its answer.",
+    promptSnippet: "Ask your owner for required information or decisions",
+    promptGuidelines: [
+      "Use subagent_ask whenever you need information or a decision from your owner.",
+      "Never return an owner-directed question as final output.",
+      "Continue the original task after your owner responds.",
+    ],
     parameters: Type.Object({
       prompt: Type.String({ description: "Question for the direct owner" }),
     }),
