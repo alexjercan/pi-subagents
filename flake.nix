@@ -26,7 +26,6 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.nodejs_24
-            pkgs.tmux
             agents.pi
             agents.claude-code
           ];

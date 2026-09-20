@@ -4,10 +4,7 @@
 
 ## Project
 
-- `pi-subagents` is only a sub-agent runtime and Pi extension.
-- Pi lifecycle, tools, commands, and presentation belong in `extensions/pi-subagents/`.
-- Harness protocol parsing stays behind harness adapters.
-- Process ownership and state stay independent from presentation.
+- `pi-subagents` is a sub-agent runtime and Pi extension.
 
 ## Work
 
@@ -29,12 +26,8 @@ Before code edits, show exact paths and lines, existing types and functions, pro
 ## Change policy
 
 - Replace obsolete internal interfaces. Delete old paths, adapters, aliases, and tests.
-- Do not add speculative compatibility, abstractions, fallbacks, or configuration.
+- Do not add speculative requirements, compatibility, abstractions, fallbacks, configuration, or dependencies.
 - Change the owning interface first. Use type errors and searches to update every caller.
-- Treat worker identity, process ownership, cancellation, bounds, and terminal states as correctness boundaries.
-- Use exact process IDs or recorded process-group IDs. Never use broad process matching.
-- Keep Claude workers as leaves through enforced tool configuration.
-- Do not make tmux part of normal execution.
 - Put Pi APIs in `peerDependencies`. Put runtime libraries in `dependencies`.
 
 ## Comments
