@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { loadAgentProfiles, type LoadAgentProfilesOptions } from "./config.ts";
+import {
+  loadAgentProfiles,
+  type AgentProfile,
+  type LoadAgentProfilesOptions,
+} from "./config.ts";
 import {
   spawnHarness,
   type ClaudeThinkingLevel,
@@ -11,7 +15,12 @@ import {
 } from "./harness.ts";
 import { createDelegationHost, type DelegationHost } from "./mcp.ts";
 
-export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled";
+export type AgentRunStatus =
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface AgentUsage {
   inputTokens: number;
@@ -23,14 +32,16 @@ export interface AgentUsage {
 }
 
 export interface AgentRunSnapshot {
+  runId: string;
   id: string;
-  parentId?: string;
+  parentRunId?: string;
   agent: string;
   harness: "pi" | "claude";
   model: string;
   thinking: PiThinkingLevel | ClaudeThinkingLevel;
   pid: number;
   status: AgentRunStatus;
+  question?: string;
   startedAt: number;
   endedAt?: number;
   usage: AgentUsage;
@@ -39,13 +50,43 @@ export interface AgentRunSnapshot {
   error?: string;
 }
 
+export interface AgentKind {
+  name: string;
+  description: string;
+  harness: "pi" | "claude";
+  model: string;
+  thinking: PiThinkingLevel | ClaudeThinkingLevel;
+}
+
+export interface OwnedAgentRun {
+  id: string;
+  name: string;
+  status: AgentRunStatus;
+  question?: string;
+  finalText?: string;
+  error?: string;
+}
+
+export interface AgentInventory {
+  kinds: AgentKind[];
+  runs: OwnedAgentRun[];
+}
+
+export interface StartAgentRequest {
+  id: string;
+  name: string;
+  prompt: string;
+  parentRunId?: string;
+}
+
 export interface AgentRuntime {
-  run(
-    agent: string,
-    task: string,
-    parentId: string | undefined,
-    signal: AbortSignal,
-  ): Promise<AgentRunSnapshot>;
+  start(request: StartAgentRequest): Promise<AgentRunSnapshot>;
+  message(
+    ownerRunId: string | undefined,
+    id: string,
+    message: string,
+  ): Promise<void>;
+  inventory(ownerRunId?: string): Promise<AgentInventory>;
   list(): AgentRunSnapshot[];
   stopAll(): void;
   close(): Promise<void>;
@@ -53,6 +94,12 @@ export interface AgentRuntime {
 
 export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
+  onRootMessage?: (message: string) => void | Promise<void>;
+}
+
+interface PendingQuestion {
+  resolve(answer: string): void;
+  reject(error: Error): void;
 }
 
 function mergeUsage(current: AgentUsage, update: HarnessUsage): void {
@@ -76,11 +123,24 @@ function mergeUsage(current: AgentUsage, update: HarnessUsage): void {
   }
 }
 
+function kind(profile: AgentProfile): AgentKind {
+  return {
+    name: profile.name,
+    description: profile.description,
+    harness: profile.config.harness,
+    model: profile.config.model,
+    thinking: profile.config.thinking,
+  };
+}
+
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
   const snapshots = new Map<string, AgentRunSnapshot>();
   const active = new Map<string, HarnessRun>();
+  const authorizations = new Map<string, string>();
+  const questions = new Map<string, PendingQuestion>();
+  let closing = false;
   let host: DelegationHost;
 
   const list = () =>
@@ -90,55 +150,211 @@ export async function createAgentRuntime(
       events: [...snapshot.events],
     }));
   const emit = () => options.onUpdate?.(list());
-  const stopTree = (id: string) => {
+  const child = (ownerRunId: string | undefined, id: string) =>
+    [...snapshots.values()].find(
+      (snapshot) => snapshot.parentRunId === ownerRunId && snapshot.id === id,
+    );
+  const stopTree = (runId: string) => {
     for (const snapshot of snapshots.values()) {
-      if (snapshot.parentId === id) stopTree(snapshot.id);
+      if (snapshot.parentRunId === runId) stopTree(snapshot.runId);
     }
-    active.get(id)?.stop();
+    questions.get(runId)?.reject(new Error("Agent was cancelled"));
+    questions.delete(runId);
+    active.get(runId)?.stop();
+  };
+  const notifyOwner = async (snapshot: AgentRunSnapshot, message: string) => {
+    if (snapshot.parentRunId) {
+      const owner = active.get(snapshot.parentRunId);
+      if (!owner) throw new Error(`Owner of ${snapshot.id} is not running`);
+      await owner.send(message);
+      return;
+    }
+    await options.onRootMessage?.(message);
+  };
+  const profiles = () => loadAgentProfiles(options);
+  const allowedProfiles = async (ownerRunId?: string) => {
+    const loaded = await profiles();
+    if (!ownerRunId) return loaded;
+    const owner = snapshots.get(ownerRunId);
+    if (!owner) throw new Error("Unknown subagent owner");
+    const ownerProfile = loaded.find((profile) => profile.name === owner.agent);
+    const allowed = new Set(ownerProfile?.delegates ?? []);
+    return loaded.filter((profile) => allowed.has(profile.name));
   };
 
-  const run = async (
-    agent: string,
-    task: string,
-    parentId: string | undefined,
+  const inventory = async (ownerRunId?: string): Promise<AgentInventory> => ({
+    kinds: (await allowedProfiles(ownerRunId)).map(kind),
+    runs: [...snapshots.values()]
+      .filter((snapshot) => snapshot.parentRunId === ownerRunId)
+      .map((snapshot) => ({
+        id: snapshot.id,
+        name: snapshot.agent,
+        status: snapshot.status,
+        ...(snapshot.question === undefined
+          ? {}
+          : { question: snapshot.question }),
+        ...(snapshot.result?.finalText
+          ? { finalText: snapshot.result.finalText }
+          : {}),
+        ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+      })),
+  });
+
+  const message = async (
+    ownerRunId: string | undefined,
+    id: string,
+    value: string,
+  ) => {
+    const snapshot = child(ownerRunId, id);
+    if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+    const pending = questions.get(snapshot.runId);
+    if (pending) {
+      questions.delete(snapshot.runId);
+      snapshot.question = undefined;
+      snapshot.status = "running";
+      pending.resolve(value);
+      emit();
+      return;
+    }
+    const run = active.get(snapshot.runId);
+    if (!run || snapshot.status !== "running")
+      throw new Error(`Subagent ${id} is not running`);
+    await run.send(value);
+  };
+
+  const ask = async (
+    runId: string,
+    prompt: string,
     signal: AbortSignal,
+  ): Promise<string> => {
+    const snapshot = snapshots.get(runId);
+    if (!snapshot || !active.has(runId))
+      throw new Error("Agent is not running");
+    if (questions.has(runId))
+      throw new Error(`Subagent ${snapshot.id} already has a pending question`);
+    snapshot.status = "waiting";
+    snapshot.question = prompt;
+    emit();
+    let rejectQuestion: (error: Error) => void = () => undefined;
+    const answer = new Promise<string>((resolve, reject) => {
+      rejectQuestion = reject;
+      questions.set(runId, { resolve, reject });
+    });
+    const abort = () => {
+      questions.delete(runId);
+      snapshot.question = undefined;
+      if (active.has(runId)) snapshot.status = "running";
+      rejectQuestion(new Error("Question was cancelled"));
+      emit();
+    };
+    if (signal.aborted) {
+      abort();
+      throw new Error("Question was cancelled");
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      await notifyOwner(
+        snapshot,
+        `Subagent ${snapshot.id} asks: ${prompt}\nAnswer with subagent_message using id ${JSON.stringify(snapshot.id)}.`,
+      );
+      return await answer;
+    } catch (error) {
+      if (questions.get(runId)) {
+        questions.delete(runId);
+        snapshot.question = undefined;
+        if (active.has(runId)) snapshot.status = "running";
+        emit();
+      }
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  };
+
+  const settle = async (snapshot: AgentRunSnapshot, run: HarnessRun) => {
+    try {
+      const result = await run.completion;
+      snapshot.result = result;
+      if (result.signal !== null) {
+        snapshot.status = "cancelled";
+        snapshot.error = "Agent was cancelled";
+      } else if (result.exitCode !== 0) {
+        snapshot.status = "failed";
+        snapshot.error =
+          result.stderr.trim() || `Agent exited with code ${result.exitCode}`;
+      } else {
+        snapshot.status = "completed";
+      }
+    } catch (error) {
+      snapshot.status = "failed";
+      snapshot.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      snapshot.endedAt = Date.now();
+      active.delete(snapshot.runId);
+      questions
+        .get(snapshot.runId)
+        ?.reject(
+          new Error(snapshot.error ?? "Agent completed before answering"),
+        );
+      questions.delete(snapshot.runId);
+      for (const candidate of snapshots.values()) {
+        if (candidate.parentRunId === snapshot.runId) stopTree(candidate.runId);
+      }
+      const authorization = authorizations.get(snapshot.runId);
+      if (authorization) host.revoke(authorization);
+      authorizations.delete(snapshot.runId);
+      emit();
+    }
+    if (!closing) {
+      const output =
+        snapshot.result?.finalText || snapshot.error || "(no output)";
+      try {
+        await notifyOwner(
+          snapshot,
+          `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+        );
+      } catch (error) {
+        snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
+        emit();
+      }
+    }
+  };
+
+  const start = async (
+    request: StartAgentRequest,
   ): Promise<AgentRunSnapshot> => {
-    const profiles = await loadAgentProfiles(options);
-    const profile = profiles.find((candidate) => candidate.name === agent);
+    if (!request.id) throw new Error("Subagent id must be a non-empty string");
+    if (!request.name)
+      throw new Error("Subagent name must be a non-empty string");
+    if (!request.prompt)
+      throw new Error("Subagent prompt must be a non-empty string");
+    if (child(request.parentRunId, request.id))
+      throw new Error(`Duplicate directly owned subagent id ${request.id}`);
+    const allowed = await allowedProfiles(request.parentRunId);
+    const profile = allowed.find(
+      (candidate) => candidate.name === request.name,
+    );
     if (!profile) {
-      const available = profiles.map((candidate) => candidate.name).join(", ");
+      const names = allowed.map((candidate) => candidate.name).join(", ");
       throw new Error(
-        `Unknown agent ${agent}. Available agents: ${available || "none"}`,
+        `Unknown or disallowed agent ${request.name}. Available agents: ${names || "none"}`,
       );
     }
 
-    const id = randomUUID();
-    let authorization: string | undefined;
-    if (profile.config.harness === "claude" && profile.delegates.length > 0) {
-      authorization = host.grant(id, profile.delegates);
-    }
-    const controller = new AbortController();
-    const abort = () => {
-      controller.abort();
-      stopTree(id);
-    };
-    if (signal.aborted) abort();
-    else signal.addEventListener("abort", abort, { once: true });
-
+    const runId = randomUUID();
+    const authorization = host.grant(runId, profile.delegates);
     let harnessRun: HarnessRun;
     try {
       harnessRun = spawnHarness(
-        { cwd: options.cwd, prompt: task },
+        { cwd: options.cwd, prompt: request.prompt },
         profile.config,
         {
           system: profile.system,
           tools: profile.tools,
-          delegation: authorization
-            ? { url: host.url, authorization }
-            : undefined,
+          delegation: { url: host.url, authorization },
         },
         (event) => {
-          const snapshot = snapshots.get(id);
+          const snapshot = snapshots.get(runId);
           if (!snapshot) return;
           if (event.type === "usage") mergeUsage(snapshot.usage, event.usage);
           snapshot.events.push(event);
@@ -146,15 +362,15 @@ export async function createAgentRuntime(
         },
       );
     } catch (error) {
-      if (authorization) host.revoke(authorization);
-      signal.removeEventListener("abort", abort);
+      host.revoke(authorization);
       throw error;
     }
 
     const snapshot: AgentRunSnapshot = {
-      id,
-      parentId,
-      agent,
+      runId,
+      id: request.id,
+      parentRunId: request.parentRunId,
+      agent: request.name,
       harness: profile.config.harness,
       model: profile.config.model,
       thinking: profile.config.thinking,
@@ -169,62 +385,43 @@ export async function createAgentRuntime(
       },
       events: [],
     };
-    snapshots.set(id, snapshot);
-    active.set(id, harnessRun);
-    if (controller.signal.aborted) harnessRun.stop();
+    snapshots.set(runId, snapshot);
+    active.set(runId, harnessRun);
+    authorizations.set(runId, authorization);
     emit();
-
-    try {
-      const result = await harnessRun.completion;
-      snapshot.result = result;
-      if (controller.signal.aborted || result.signal !== null) {
-        snapshot.status = "cancelled";
-        snapshot.error = "Agent was cancelled";
-        throw new Error(snapshot.error);
-      }
-      if (result.exitCode !== 0) {
-        snapshot.status = "failed";
-        snapshot.error =
-          result.stderr.trim() || `Agent exited with code ${result.exitCode}`;
-        throw new Error(snapshot.error);
-      }
-      snapshot.status = "completed";
-      return {
-        ...snapshot,
-        usage: { ...snapshot.usage },
-        events: [...snapshot.events],
-      };
-    } catch (error) {
-      if (snapshot.status === "running") {
-        snapshot.status = controller.signal.aborted ? "cancelled" : "failed";
-        snapshot.error = error instanceof Error ? error.message : String(error);
-      }
-      throw error;
-    } finally {
-      snapshot.endedAt = Date.now();
-      active.delete(id);
-      if (authorization) host.revoke(authorization);
-      signal.removeEventListener("abort", abort);
-      emit();
-    }
+    void settle(snapshot, harnessRun);
+    return {
+      ...snapshot,
+      usage: { ...snapshot.usage },
+      events: [...snapshot.events],
+    };
   };
 
-  host = await createDelegationHost(async (parentId, agent, task, signal) => {
-    const snapshot = await run(agent, task, parentId, signal);
-    return snapshot.result?.finalText ?? "";
+  host = await createDelegationHost({
+    start: (callerRunId, id, name, prompt) =>
+      start({ id, name, prompt, parentRunId: callerRunId }),
+    message: (callerRunId, id, value) => message(callerRunId, id, value),
+    list: (callerRunId) => inventory(callerRunId),
+    ask,
   });
 
   return {
-    run,
+    start,
+    message,
+    inventory,
     list,
     stopAll() {
-      for (const run of active.values()) run.stop();
+      for (const snapshot of snapshots.values()) {
+        if (!snapshot.parentRunId) stopTree(snapshot.runId);
+      }
     },
     async close() {
-      for (const run of active.values()) run.stop();
-      await Promise.allSettled(
-        [...active.values()].map((run) => run.completion),
-      );
+      closing = true;
+      const runs = [...active.values()];
+      for (const snapshot of snapshots.values()) {
+        if (!snapshot.parentRunId) stopTree(snapshot.runId);
+      }
+      await Promise.allSettled(runs.map((run) => run.completion));
       await host.close();
     },
   };

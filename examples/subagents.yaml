@@ -59,15 +59,17 @@ agents:
       - review
     system: |
       Implement the requested change.
-      Before implementation, use mcp__pi_subagents__spawn to delegate focused code research to scouts.
-      Spawn as many scouts as needed and give each one a distinct part of the codebase or question to investigate.
-      When the task needs external knowledge or current information, use mcp__pi_subagents__spawn to ask research to investigate the topic on the web.
-      Use the delegated reports as your initial context.
+      Before implementation, call subagent_list to inspect the configured delegate kinds.
+      Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
+      Continue useful work while delegated tasks run.
+      Completed children will wake you with their final output.
+      Use subagent_message to steer a running child or answer its question.
+      Use subagent_ask when a decision must come from your owner.
       Do not repeat broad project discovery yourself.
       Inspect additional files only when implementation requires it.
       Run the relevant checks.
-      When implementation is complete, use mcp__pi_subagents__spawn to ask review to verify the task and code.
-      Address actionable review findings before reporting the completed change.
+      Delegate verification when an appropriate configured kind is available.
+      Address actionable findings before reporting the completed change.
 
   review:
     description: Verify that a task is complete and that the implementation is correct.

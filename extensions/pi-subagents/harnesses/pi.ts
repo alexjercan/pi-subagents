@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type {
   HarnessConfig,
   HarnessEvent,
@@ -13,6 +14,7 @@ import {
   type HarnessAdapter,
   type NormalizedRecord,
 } from "../protocol.ts";
+import { SUBAGENT_TOOL_NAMES } from "../tool-names.ts";
 
 type PiConfig = Extract<HarnessConfig, { harness: "pi" }>;
 
@@ -22,10 +24,9 @@ export function createPiAdapter(
   options: HarnessLaunchOptions,
 ): HarnessAdapter {
   const args = [
-    "--print",
     "--no-session",
     "--mode",
-    "json",
+    "rpc",
     "--model",
     config.model,
     "--thinking",
@@ -33,17 +34,34 @@ export function createPiAdapter(
     "--append-system-prompt",
     options.system,
   ];
-  if (options.tools !== undefined) {
-    if (options.tools.length === 0) args.push("--no-tools");
-    else args.push("--tools", options.tools.join(","));
+  if (options.delegation) {
+    args.push(
+      "--extension",
+      fileURLToPath(new URL("../bridge.ts", import.meta.url)),
+    );
   }
-  args.push("--", request.prompt);
+  if (options.tools !== undefined) {
+    const tools = options.delegation
+      ? [...options.tools, ...SUBAGENT_TOOL_NAMES]
+      : options.tools;
+    if (tools.length === 0) args.push("--no-tools");
+    else args.push("--tools", [...new Set(tools)].join(","));
+  }
   return {
     process: {
       command: "pi",
       args,
       cwd: request.cwd,
+      env: options.delegation
+        ? {
+            ...process.env,
+            PI_SUBAGENTS_MCP_URL: options.delegation.url,
+            PI_SUBAGENTS_MCP_AUTHORIZATION: options.delegation.authorization,
+          }
+        : undefined,
     },
+    initial: (prompt) => ({ type: "prompt", message: prompt }),
+    steer: (message) => ({ type: "steer", message }),
     normalize: normalizePiRecord,
   };
 }
@@ -52,6 +70,7 @@ export function normalizePiRecord(value: unknown): NormalizedRecord {
   const event = record(value);
   const type = string(event?.type);
   if (!event || !type) return { events: [] };
+  if (type === "agent_settled") return { events: [], settled: true };
 
   if (type === "tool_execution_start") {
     return {

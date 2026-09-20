@@ -17,6 +17,8 @@ interface ProcessResult {
 interface ProcessRun {
   pid: number;
   completion: Promise<ProcessResult>;
+  send(value: unknown): Promise<void>;
+  end(): void;
   stop(): void;
 }
 
@@ -28,7 +30,7 @@ export function spawnJsonlProcess(
     cwd: spec.cwd,
     env: spec.env,
     shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   if (child.pid === undefined) {
     child.once("error", () => undefined);
@@ -40,6 +42,7 @@ export function spawnJsonlProcess(
   let stdout = "";
   let stderr = "";
   let protocolError: Error | undefined;
+  let ended = false;
 
   const parseLine = (line: string) => {
     const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
@@ -72,6 +75,7 @@ export function spawnJsonlProcess(
   const completion = new Promise<ProcessResult>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (exitCode, signal) => {
+      ended = true;
       stdout += stdoutDecoder.end();
       stderr += stderrDecoder.end();
       parseLines();
@@ -87,6 +91,20 @@ export function spawnJsonlProcess(
   return {
     pid: child.pid,
     completion,
+    send: async (value) => {
+      if (ended || child.stdin.destroyed || !child.stdin.writable)
+        throw new Error("Harness input is closed");
+      const record = `${JSON.stringify(value)}\n`;
+      await new Promise<void>((resolve, reject) => {
+        child.stdin.write(record, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    },
+    end: () => {
+      if (!ended && !child.stdin.destroyed) child.stdin.end();
+    },
     stop: () => {
       child.kill("SIGTERM");
     },

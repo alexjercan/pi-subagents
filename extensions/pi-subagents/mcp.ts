@@ -1,150 +1,245 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import type { Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import type { Request, Response } from "express";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import * as z from "zod/v4";
 
 interface Grant {
-  parentId: string;
+  callerRunId: string;
   agents: Set<string>;
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+  ready: Promise<void>;
 }
 
-interface Connection {
-  authorization: string;
-  server: McpServer;
-  transport: StreamableHTTPServerTransport;
+export interface DelegationOperations {
+  start(
+    callerRunId: string,
+    id: string,
+    name: string,
+    prompt: string,
+  ): Promise<unknown>;
+  message(callerRunId: string, id: string, message: string): Promise<void>;
+  list(callerRunId: string): Promise<unknown>;
+  ask(
+    callerRunId: string,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string>;
 }
 
 export interface DelegationHost {
   url: string;
-  grant(parentId: string, agents: string[]): string;
+  grant(callerRunId: string, agents: string[]): string;
   revoke(authorization: string): void;
   close(): Promise<void>;
 }
 
+function text(value: unknown) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: typeof value === "string" ? value : JSON.stringify(value),
+      },
+    ],
+  };
+}
+
+function failure(error: unknown) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: error instanceof Error ? error.message : String(error),
+      },
+    ],
+    isError: true,
+  };
+}
+
+function headers(request: IncomingMessage): Headers {
+  const result = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) result.append(name, item);
+    } else if (value !== undefined) {
+      result.set(name, value);
+    }
+  }
+  return result;
+}
+
+async function body(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function writeResponse(
+  target: ServerResponse,
+  source: Response,
+): Promise<void> {
+  target.statusCode = source.status;
+  source.headers.forEach((value, name) => target.setHeader(name, value));
+  target.end(Buffer.from(await source.arrayBuffer()));
+}
+
+function writeError(response: ServerResponse, error: unknown): void {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+  response.statusCode = 500;
+  response.setHeader("content-type", "application/json");
+  response.end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: {
+        code: -32603,
+        message: error instanceof Error ? error.message : String(error),
+      },
+      id: null,
+    }),
+  );
+}
+
 export async function createDelegationHost(
-  spawn: (
-    parentId: string,
-    agent: string,
-    task: string,
-    signal: AbortSignal,
-  ) => Promise<string>,
+  operations: DelegationOperations,
 ): Promise<DelegationHost> {
   const grants = new Map<string, Grant>();
-  const connections = new Map<string, Connection>();
-  const app = createMcpExpressApp({ host: "127.0.0.1" });
 
-  const createServer = (grant: Grant) => {
+  const createToolServer = (grant: Grant) => {
     const server = new McpServer({ name: "pi-subagents", version: "0.1.0" });
     server.registerTool(
-      "spawn",
+      "subagent",
       {
-        description:
-          "Spawn an allowed named subagent and return its final report.",
+        description: "Start a configured direct child and return immediately.",
         inputSchema: {
-          agent: z.string().min(1),
-          task: z.string().min(1),
+          id: z.string().min(1),
+          name: z.string().min(1),
+          prompt: z.string().min(1),
         },
       },
-      async ({ agent, task }, extra) => {
-        if (!grant.agents.has(agent)) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Agent ${agent} is not an allowed delegate`,
-              },
-            ],
-            isError: true,
-          };
-        }
+      async ({ id, name, prompt }) => {
+        if (!grant.agents.has(name))
+          return failure(`Agent ${name} is not an allowed delegate`);
         try {
-          const result = await spawn(grant.parentId, agent, task, extra.signal);
-          return { content: [{ type: "text" as const, text: result }] };
+          return text(
+            await operations.start(grant.callerRunId, id, name, prompt),
+          );
         } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: error instanceof Error ? error.message : String(error),
-              },
-            ],
-            isError: true,
-          };
+          return failure(error);
+        }
+      },
+    );
+    server.registerTool(
+      "subagent_message",
+      {
+        description: "Send a message to a directly owned running child.",
+        inputSchema: {
+          id: z.string().min(1),
+          message: z.string().min(1),
+        },
+      },
+      async ({ id, message }) => {
+        try {
+          await operations.message(grant.callerRunId, id, message);
+          return text(`Message sent to ${id}`);
+        } catch (error) {
+          return failure(error);
+        }
+      },
+    );
+    server.registerTool(
+      "subagent_list",
+      {
+        description: "List allowed agent kinds and directly owned runs.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return text(await operations.list(grant.callerRunId));
+        } catch (error) {
+          return failure(error);
+        }
+      },
+    );
+    server.registerTool(
+      "subagent_ask",
+      {
+        description: "Ask the direct owner a question and wait for its answer.",
+        inputSchema: { prompt: z.string().min(1) },
+      },
+      async ({ prompt }, extra) => {
+        try {
+          return text(
+            await operations.ask(grant.callerRunId, prompt, extra.signal),
+          );
+        } catch (error) {
+          return failure(error);
         }
       },
     );
     return server;
   };
 
-  const handle = async (request: Request, response: Response) => {
-    const authorization = request.header("authorization") ?? "";
+  const handle = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> => {
+    if (request.url !== "/mcp") {
+      response.statusCode = 404;
+      response.end();
+      return;
+    }
+    const authorization = request.headers.authorization ?? "";
     const grant = grants.get(authorization);
     if (!grant) {
-      response.status(401).json({ error: "Unauthorized" });
+      response.statusCode = 401;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ error: "Unauthorized" }));
       return;
     }
 
-    const sessionId = request.header("mcp-session-id");
-    let connection = sessionId ? connections.get(sessionId) : undefined;
-    if (connection && connection.authorization !== authorization) {
-      response.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    if (!connection && !sessionId && isInitializeRequest(request.body)) {
-      const server = createServer(grant);
-      let transport: StreamableHTTPServerTransport;
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: randomUUID,
-        onsessioninitialized(id) {
-          connections.set(id, { authorization, server, transport });
-        },
-        onsessionclosed(id) {
-          connections.delete(id);
-        },
-      });
-      transport.onclose = () => {
-        const id = transport.sessionId;
-        if (id) connections.delete(id);
-      };
-      connection = { authorization, server, transport };
-      await server.connect(transport);
-    }
-    if (!connection) {
-      response.status(400).json({
-        jsonrpc: "2.0",
-        error: { code: -32000, message: "Invalid or missing MCP session" },
-        id: null,
-      });
-      return;
-    }
-
-    try {
-      await connection.transport.handleRequest(request, response, request.body);
-    } catch (error) {
-      if (!response.headersSent) {
-        response.status(500).json({
-          jsonrpc: "2.0",
-          error: {
-            code: -32603,
-            message: error instanceof Error ? error.message : String(error),
-          },
-          id: null,
-        });
-      }
-    }
+    const controller = new AbortController();
+    request.once("aborted", () => controller.abort());
+    response.once("close", () => {
+      if (!response.writableEnded) controller.abort();
+    });
+    const requestBody = await body(request);
+    const method = request.method ?? "GET";
+    const webRequest = new Request(`http://127.0.0.1${request.url}`, {
+      method,
+      headers: headers(request),
+      body:
+        method === "GET" || method === "HEAD" || requestBody.length === 0
+          ? undefined
+          : requestBody.toString("utf8"),
+      signal: controller.signal,
+    });
+    await grant.ready;
+    await writeResponse(
+      response,
+      await grant.transport.handleRequest(webRequest),
+    );
   };
 
-  app.post("/mcp", handle);
-  app.get("/mcp", handle);
-  app.delete("/mcp", handle);
-
-  const httpServer = await new Promise<Server>((resolve, reject) => {
-    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
-    listening.once("error", reject);
+  const httpServer = createServer((request, response) => {
+    void handle(request, response).catch((error) =>
+      writeError(response, error),
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    httpServer.listen(0, "127.0.0.1", resolve);
+    httpServer.once("error", reject);
   });
   const address = httpServer.address();
   if (!address || typeof address === "string") {
@@ -154,27 +249,30 @@ export async function createDelegationHost(
 
   return {
     url: `http://127.0.0.1:${address.port}/mcp`,
-    grant(parentId, agents) {
+    grant(callerRunId, agents) {
       const authorization = `Bearer ${randomBytes(32).toString("hex")}`;
-      grants.set(authorization, { parentId, agents: new Set(agents) });
+      const grant = {
+        callerRunId,
+        agents: new Set(agents),
+      } as Grant;
+      grant.transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: randomUUID,
+        enableJsonResponse: true,
+      });
+      grant.server = createToolServer(grant);
+      grant.ready = grant.server.connect(grant.transport);
+      grants.set(authorization, grant);
       return authorization;
     },
     revoke(authorization) {
+      const grant = grants.get(authorization);
       grants.delete(authorization);
-      for (const [id, connection] of connections) {
-        if (connection.authorization !== authorization) continue;
-        connections.delete(id);
-        void connection.transport.close();
-      }
+      if (grant) void grant.server.close();
     },
     async close() {
+      const servers = [...grants.values()].map((grant) => grant.server);
       grants.clear();
-      await Promise.allSettled(
-        [...connections.values()].map((connection) =>
-          connection.transport.close(),
-        ),
-      );
-      connections.clear();
+      await Promise.allSettled(servers.map((server) => server.close()));
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => {
           if (error) reject(error);

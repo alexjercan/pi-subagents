@@ -12,20 +12,26 @@ interface TestContext {
   isProjectTrusted(): boolean;
   ui: {
     setWidget(name: string, value: unknown): void;
+    input(title: string, prompt: string): Promise<string | undefined>;
   };
 }
 
 interface RegisteredTool {
+  name: string;
   execute(
     id: string,
-    params: { agent: string; task: string },
+    params: Record<string, string>,
     signal: AbortSignal,
     onUpdate: undefined,
     context: TestContext,
   ): Promise<unknown>;
 }
 
-test("Extension shows active runs in a widget and clears it after completion", async () => {
+async function until(predicate: () => boolean): Promise<void> {
+  while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+test("Extension exposes four async tools and clears completed runs", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
   const project = join(directory, "project");
   await mkdir(join(project, ".pi"), { recursive: true });
@@ -37,7 +43,7 @@ test("Extension shows active runs in a widget and clears it after completion", a
     harness: claude
     model: haiku
     thinking: medium
-    tools: [read, grep, find, ls]
+    tools: [read]
     system: Inspect the project.
 `,
   );
@@ -45,8 +51,10 @@ test("Extension shows active runs in a widget and clears it after completion", a
   await writeFile(
     claude,
     `#!/usr/bin/env node
-process.stdout.write(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Inspecting" }], usage: { input_tokens: 4, output_tokens: 1 } } }) + "\\n");
-setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "Done", usage: { input_tokens: 4, output_tokens: 2 }, total_cost_usd: 0.01 }) + "\\n"), 20);
+process.stdin.once("data", () => {
+  process.stdout.write(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Inspecting" }], usage: { input_tokens: 4, output_tokens: 1 } } }) + "\\n");
+  setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "Done", usage: { input_tokens: 4, output_tokens: 2 }, total_cost_usd: 0.01 }) + "\\n"), 30);
+});
 `,
   );
   await chmod(claude, 0o755);
@@ -57,7 +65,8 @@ setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "
     string,
     (event: unknown, context: TestContext) => unknown
   >();
-  let tool: RegisteredTool | undefined;
+  const tools = new Map<string, RegisteredTool>();
+  const messages: unknown[] = [];
   const pi = {
     on(
       event: string,
@@ -66,7 +75,10 @@ setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "
       handlers.set(event, handler);
     },
     registerTool(value: RegisteredTool) {
-      tool = value;
+      tools.set(value.name, value);
+    },
+    sendMessage(message: unknown) {
+      messages.push(message);
     },
   } as unknown as ExtensionAPI;
   const widgets: unknown[] = [];
@@ -78,22 +90,31 @@ setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "
       setWidget(_name, value) {
         widgets.push(value);
       },
+      input: async () => "answer",
     },
   };
 
   try {
     piSubagents(pi);
+    assert.deepEqual([...tools.keys()].sort(), [
+      "subagent",
+      "subagent_ask",
+      "subagent_list",
+      "subagent_message",
+    ]);
     await handlers.get("session_start")?.({}, context);
+    const tool = tools.get("subagent");
     assert.ok(tool);
     await tool.execute(
       "call",
-      { agent: "scout", task: "Inspect" },
+      { id: "inspection", name: "scout", prompt: "Inspect" },
       new AbortController().signal,
       undefined,
       context,
     );
     assert.ok(widgets.some((value) => typeof value === "function"));
-    assert.equal(widgets.at(-1), undefined);
+    await until(() => widgets.at(-1) === undefined && messages.length === 1);
+    assert.match(JSON.stringify(messages[0]), /Subagent inspection finished/);
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
   } finally {

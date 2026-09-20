@@ -23,8 +23,9 @@ function run(
   value: Partial<AgentRunSnapshot> & Pick<AgentRunSnapshot, "id" | "agent">,
 ): AgentRunSnapshot {
   return {
+    runId: value.runId ?? value.id,
     id: value.id,
-    parentId: value.parentId,
+    parentRunId: value.parentRunId,
     agent: value.agent,
     harness: value.harness ?? "claude",
     model: value.model ?? "haiku",
@@ -70,7 +71,7 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
     }),
     run({
       id: "later",
-      parentId: "worker",
+      parentRunId: "worker",
       agent: "review",
       model: "sonnet",
       startedAt: 3000,
@@ -78,7 +79,7 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
     }),
     run({
       id: "earlier",
-      parentId: "worker",
+      parentRunId: "worker",
       agent: "scout",
       startedAt: 2000,
       endedAt: 4000,
@@ -86,14 +87,14 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
   ];
   const lines = renderAgentTree(runs, 120, theme, 61000);
   assert.match(lines[0] ?? "", /running: 1  completed: 2/);
-  assert.match(lines[1] ?? "", /worker claude\/opus think:high 01:00/);
+  assert.match(lines[1] ?? "", /worker:worker claude\/opus think:high 01:00/);
   assert.match(lines[2] ?? "", /ctx 1.6k \| in 1.0k.*\$0.12/);
   const scout = lines.findIndex((line) => line.includes("scout"));
   const review = lines.findIndex((line) => line.includes("review"));
   assert.ok(scout > 0);
   assert.ok(review > scout);
-  assert.match(lines[scout] ?? "", /\+-- \[ok\] scout/);
-  assert.match(lines[review] ?? "", /`-- \[ok\] review/);
+  assert.match(lines[scout] ?? "", /\+-- \[ok\] scout:earlier/);
+  assert.match(lines[review] ?? "", /`-- \[ok\] review:later/);
 });
 
 test("Agent tree keeps three recent one-line activities", () => {
@@ -134,7 +135,7 @@ test("Active tree includes completed children only under running roots", () => {
   const runs = [
     run({ id: "old", agent: "review" }),
     run({ id: "worker", agent: "worker", status: "running" }),
-    run({ id: "scout", parentId: "worker", agent: "scout" }),
+    run({ id: "scout", parentRunId: "worker", agent: "scout" }),
   ];
   assert.deepEqual(
     activeAgentTree(runs).map((candidate) => candidate.id),

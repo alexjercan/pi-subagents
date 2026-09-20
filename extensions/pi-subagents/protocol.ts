@@ -3,6 +3,7 @@ import type { HarnessEvent, HarnessMessage } from "./harness.ts";
 export interface NormalizedRecord {
   events: HarnessEvent[];
   finalText?: string;
+  settled?: boolean;
 }
 
 export interface HarnessAdapter {
@@ -12,6 +13,8 @@ export interface HarnessAdapter {
     cwd: string;
     env?: NodeJS.ProcessEnv;
   };
+  initial(prompt: string): unknown;
+  steer(message: string): unknown;
   normalize(value: unknown): NormalizedRecord;
 }
 

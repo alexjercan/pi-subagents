@@ -14,6 +14,7 @@ import {
   type HarnessAdapter,
   type NormalizedRecord,
 } from "../protocol.ts";
+import { SUBAGENT_TOOL_NAMES } from "../tool-names.ts";
 
 type ClaudeConfig = Extract<HarnessConfig, { harness: "claude" }>;
 
@@ -70,6 +71,8 @@ export function createClaudeAdapter(
     "bypassPermissions",
     "--output-format",
     "stream-json",
+    "--input-format",
+    "stream-json",
     "--verbose",
     "--append-system-prompt",
     options.system,
@@ -94,12 +97,11 @@ export function createClaudeAdapter(
       }),
       "--strict-mcp-config",
       "--allowedTools",
-      "mcp__pi_subagents__spawn",
+      SUBAGENT_TOOL_NAMES.map((name) => `mcp__pi_subagents__${name}`).join(","),
       "--disallowedTools",
-      "Task,Agent",
+      "Task,Agent,AskUserQuestion",
     );
   }
-  args.push("--", request.prompt);
   return {
     process: {
       command: "claude",
@@ -111,6 +113,16 @@ export function createClaudeAdapter(
         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
       },
     },
+    initial: (prompt) => ({
+      type: "user",
+      message: { role: "user", content: prompt },
+      parent_tool_use_id: null,
+    }),
+    steer: (message) => ({
+      type: "user",
+      message: { role: "user", content: message },
+      parent_tool_use_id: null,
+    }),
     normalize(value) {
       return normalizeClaudeRecord(value, toolNames);
     },
@@ -138,6 +150,7 @@ export function normalizeClaudeRecord(
           ]
         : [],
       finalText: string(event.result),
+      settled: true,
     };
   }
 

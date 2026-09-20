@@ -69,6 +69,7 @@ export interface HarnessResult {
 export interface HarnessRun {
   pid: number;
   completion: Promise<HarnessResult>;
+  send(message: string): Promise<void>;
   stop(): void;
 }
 
@@ -83,17 +84,35 @@ export function spawnHarness(
       ? createPiAdapter(request, config, options)
       : createClaudeAdapter(request, config, options);
   let finalText = "";
-  const processRun = spawnJsonlProcess(adapter.process, (value) => {
+  let settled = false;
+  let processRun!: ReturnType<typeof spawnJsonlProcess>;
+  processRun = spawnJsonlProcess(adapter.process, (value) => {
     const normalized = adapter.normalize(value);
     if (normalized.finalText !== undefined) finalText = normalized.finalText;
     for (const event of normalized.events) onEvent(event);
+    if (normalized.settled) {
+      settled = true;
+      processRun.end();
+    }
   });
+  let initialError: unknown;
+  const initialized = processRun
+    .send(adapter.initial(request.prompt))
+    .catch((error) => {
+      initialError = error;
+      processRun.stop();
+    });
   return {
     pid: processRun.pid,
+    send: (message) => processRun.send(adapter.steer(message)),
     stop: processRun.stop,
-    completion: processRun.completion.then((result) => ({
-      ...result,
-      finalText,
-    })),
+    completion: Promise.all([initialized, processRun.completion]).then(
+      ([, result]) => {
+        if (initialError) throw initialError;
+        if (!settled && result.signal === null)
+          throw new Error("Harness exited before reporting completion");
+        return { ...result, finalText };
+      },
+    ),
   };
 }

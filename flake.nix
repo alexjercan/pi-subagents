@@ -69,6 +69,34 @@
             cp ${./README.md} "$out/README.md"
             ln -s ${nodeModules}/node_modules "$out/node_modules"
           '';
+        mcpPiSmokeExtension = pkgs.writeText "pi-subagents-mcp-smoke.ts" ''
+          import { Client } from "${piSubagents}/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
+          import { StreamableHTTPClientTransport } from "${piSubagents}/node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js";
+          import { createDelegationHost } from "${piSubagents}/extensions/pi-subagents/mcp.ts";
+
+          export default function smoke(pi) {
+            pi.on("session_start", async () => {
+              const host = await createDelegationHost({
+                start: async () => ({}),
+                message: async () => undefined,
+                list: async () => ({ kinds: [], runs: [] }),
+                ask: async () => "answer",
+              });
+              const authorization = host.grant("smoke", []);
+              const client = new Client({ name: "smoke", version: "1" });
+              await client.connect(new StreamableHTTPClientTransport(
+                new URL(host.url),
+                { requestInit: { headers: { Authorization: authorization } } },
+              ));
+              await client.callTool({ name: "subagent_list", arguments: {} });
+              await Promise.allSettled([
+                client.close(),
+                Promise.resolve(host.revoke(authorization)),
+              ]);
+              await host.close();
+            });
+          }
+        '';
       in {
         formatter = pkgs.alejandra;
 
@@ -100,6 +128,25 @@
               test -d "$root/node_modules/zod"
               node --experimental-strip-types --input-type=module -e \
                 "await import('$root/extensions/pi-subagents/mcp.ts')"
+              touch "$out"
+            '';
+
+          mcp-pi-runtime =
+            pkgs.runCommand "pi-subagents-mcp-pi-runtime" {
+              nativeBuildInputs = [agents.pi];
+            } ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              printf %s "" | pi --mode rpc --no-session --no-tools \
+                --no-extensions --no-skills --no-context-files \
+                --extension ${mcpPiSmokeExtension} \
+                > "$TMPDIR/stdout" 2> "$TMPDIR/stderr"
+              if grep -E 'extension_error|FakeSocket|stream is not readable' \
+                "$TMPDIR/stdout" "$TMPDIR/stderr"; then
+                cat "$TMPDIR/stdout" >&2
+                cat "$TMPDIR/stderr" >&2
+                exit 1
+              fi
               touch "$out"
             '';
 

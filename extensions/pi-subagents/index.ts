@@ -1,4 +1,3 @@
-import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -7,15 +6,9 @@ import {
   type AgentRunSnapshot,
   type AgentRuntime,
 } from "./runtime.ts";
-import {
-  activeAgentTree,
-  agentSubtree,
-  renderAgentTree,
-  type AgentTreeTheme,
-} from "./ui.ts";
+import { activeAgentTree, renderAgentTree, type AgentTreeTheme } from "./ui.ts";
 
 interface SubagentDetails {
-  rootId?: string;
   runs: AgentRunSnapshot[];
 }
 
@@ -31,25 +24,17 @@ function colors(theme: Theme): AgentTreeTheme {
   };
 }
 
-function nestedUsage(runs: AgentRunSnapshot[]): Usage {
-  const usage: Usage = {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+function errorResult(error: unknown, runs: AgentRunSnapshot[] = []) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: error instanceof Error ? error.message : String(error),
+      },
+    ],
+    details: { runs },
+    isError: true,
   };
-  for (const run of runs) {
-    usage.input += run.usage.inputTokens;
-    usage.output += run.usage.outputTokens;
-    usage.cacheRead += run.usage.cacheReadTokens;
-    usage.cacheWrite += run.usage.cacheWriteTokens;
-    usage.cost.total += run.usage.costUsd ?? 0;
-  }
-  usage.totalTokens =
-    usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-  return usage;
 }
 
 export default function piSubagents(pi: ExtensionAPI): void {
@@ -57,12 +42,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
   let widgetRuns: AgentRunSnapshot[] = [];
   let widgetTimer: NodeJS.Timeout | undefined;
   let clearWidget = () => undefined;
-  const updates = new Set<
-    (result: {
-      content: Array<{ type: "text"; text: string }>;
-      details: SubagentDetails;
-    }) => void
-  >();
+  let askUser: ((prompt: string) => Promise<string | undefined>) | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
     const refreshWidget = () => {
@@ -91,16 +71,20 @@ export default function piSubagents(pi: ExtensionAPI): void {
       widgetRuns = [];
       if (ctx.mode === "tui") ctx.ui.setWidget("pi-subagents", undefined);
     };
+    askUser = (prompt) => ctx.ui.input("Subagent question", prompt);
     runtime = await createAgentRuntime({
       cwd: ctx.cwd,
       projectTrusted: ctx.isProjectTrusted(),
-      onUpdate(runs) {
-        setWidget(runs);
-        const result = {
-          content: [{ type: "text" as const, text: "Subagents updated" }],
-          details: { runs },
-        };
-        for (const update of updates) update(result);
+      onUpdate: setWidget,
+      onRootMessage(message) {
+        pi.sendMessage(
+          {
+            customType: "pi-subagents",
+            content: message,
+            display: true,
+          },
+          { triggerTurn: true, deliverAs: "steer" },
+        );
       },
     });
   });
@@ -108,7 +92,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     const current = runtime;
     runtime = undefined;
-    updates.clear();
+    askUser = undefined;
     clearWidget();
     clearWidget = () => undefined;
     await current?.close();
@@ -117,69 +101,44 @@ export default function piSubagents(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Run a configured agent in an isolated process.",
-    promptSnippet: "Delegate focused research, implementation, or review work",
+    description: "Start a configured direct child and return immediately.",
+    promptSnippet: "Start configured subagents without waiting for completion",
     promptGuidelines: [
-      "Use subagent to run the configured scout, worker, and review agents.",
+      "Call subagent_list to discover configured agent kinds.",
+      "Use a distinct id for each directly owned subagent.",
+      "Completed subagents wake you with their final output.",
     ],
     parameters: Type.Object({
-      agent: Type.String({ description: "Configured agent name" }),
-      task: Type.String({ description: "Task for the agent" }),
+      id: Type.String({ minLength: 1, description: "Child identifier" }),
+      name: Type.String({ minLength: 1, description: "Configured agent kind" }),
+      prompt: Type.String({ minLength: 1, description: "Initial prompt" }),
     }),
-    async execute(_toolCallId, params, signal, onUpdate) {
-      if (!runtime) {
-        return {
-          content: [{ type: "text", text: "Subagent runtime is not running" }],
-          details: { runs: [] },
-          isError: true,
-        };
-      }
-      if (onUpdate) updates.add(onUpdate);
-      const executionSignal = signal ?? new AbortController().signal;
+    async execute(_toolCallId, params) {
+      if (!runtime) return errorResult("Subagent runtime is not running");
       try {
-        const result = await runtime.run(
-          params.agent,
-          params.task,
-          undefined,
-          executionSignal,
-        );
-        const runs = agentSubtree(runtime.list(), result.id);
+        const run = await runtime.start(params);
         return {
           content: [
             {
               type: "text",
-              text: result.result?.finalText || "(no output)",
+              text: `Started subagent ${run.id} using ${run.agent}`,
             },
           ],
-          details: { rootId: result.id, runs },
-          usage: nestedUsage(runs),
+          details: { runs: [run] },
         };
       } catch (error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: error instanceof Error ? error.message : String(error),
-            },
-          ],
-          details: { runs: runtime.list() },
-          isError: true,
-        };
-      } finally {
-        if (onUpdate) updates.delete(onUpdate);
+        return errorResult(error, runtime.list());
       }
     },
     renderCall(args, theme) {
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", args.agent)}`,
+        `${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", args.id)} ${theme.fg("muted", args.name)}`,
         0,
         0,
       );
     },
-    renderResult(result, { isPartial }, theme) {
+    renderResult(result, _options, theme) {
       const details = result.details as SubagentDetails | undefined;
-      if (isPartial)
-        return new Text(theme.fg("muted", "Subagents running..."), 0, 0);
       if (!details || details.runs.length === 0) {
         const content = result.content[0];
         return new Text(
@@ -192,6 +151,71 @@ export default function piSubagents(pi: ExtensionAPI): void {
         render: (width: number) =>
           renderAgentTree(details.runs, width, colors(theme), Date.now()),
         invalidate() {},
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_message",
+    label: "Subagent Message",
+    description: "Send a message to a directly owned running subagent.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1, description: "Direct child identifier" }),
+      message: Type.String({
+        minLength: 1,
+        description: "Steering message or answer",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      if (!runtime) return errorResult("Subagent runtime is not running");
+      try {
+        await runtime.message(undefined, params.id, params.message);
+        return {
+          content: [{ type: "text", text: `Message sent to ${params.id}` }],
+          details: { runs: runtime.list() },
+        };
+      } catch (error) {
+        return errorResult(error, runtime.list());
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_list",
+    label: "Subagent List",
+    description: "List configured agent kinds and directly owned runs.",
+    parameters: Type.Object({}),
+    async execute() {
+      if (!runtime) return errorResult("Subagent runtime is not running");
+      try {
+        const inventory = await runtime.inventory();
+        return {
+          content: [{ type: "text", text: JSON.stringify(inventory) }],
+          details: { runs: runtime.list() },
+        };
+      } catch (error) {
+        return errorResult(error, runtime.list());
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_ask",
+    label: "Subagent Ask",
+    description: "Ask the owning user a question and wait for the answer.",
+    parameters: Type.Object({
+      prompt: Type.String({
+        minLength: 1,
+        description: "Question for the user",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      if (!askUser) return errorResult("Subagent runtime is not running");
+      const answer = await askUser(params.prompt);
+      if (answer === undefined) return errorResult("Question was cancelled");
+      return {
+        content: [{ type: "text", text: answer }],
+        details: { runs: runtime?.list() ?? [] },
       };
     },
   });

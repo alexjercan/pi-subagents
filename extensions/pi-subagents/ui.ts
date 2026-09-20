@@ -69,9 +69,20 @@ function formatTool(name: string, value: unknown): string {
   if (normalized === "webfetch" || normalized === "web_fetch") {
     return `WebFetch ${string(input.url) ?? ""}`;
   }
-  if (normalized.includes("pi_subagents") || normalized === "spawn") {
+  if (normalized.endsWith("subagent_message")) {
     return compact(
-      `spawn ${string(input.agent) ?? "agent"} ${JSON.stringify(string(input.task) ?? "")}`,
+      `subagent_message ${string(input.id) ?? "child"} ${JSON.stringify(string(input.message) ?? "")}`,
+    );
+  }
+  if (normalized.endsWith("subagent_list")) return "subagent_list";
+  if (normalized.endsWith("subagent_ask")) {
+    return compact(
+      `subagent_ask ${JSON.stringify(string(input.prompt) ?? "")}`,
+    );
+  }
+  if (normalized.endsWith("subagent")) {
+    return compact(
+      `subagent ${string(input.id) ?? "child"} ${string(input.name) ?? "agent"} ${JSON.stringify(string(input.prompt) ?? "")}`,
     );
   }
   const serialized = JSON.stringify(value);
@@ -129,6 +140,7 @@ function formatUsage(usage: AgentUsage): string {
 
 function status(run: AgentRunSnapshot, theme: AgentTreeTheme): string {
   if (run.status === "running") return theme.warning("[>]");
+  if (run.status === "waiting") return theme.warning("[?]");
   if (run.status === "completed") return theme.success("[ok]");
   if (run.status === "failed") return theme.error("[x]");
   return theme.muted("[-]");
@@ -143,27 +155,35 @@ export function agentSubtree(
   while (changed) {
     changed = false;
     for (const run of runs) {
-      if (run.parentId && included.has(run.parentId) && !included.has(run.id)) {
-        included.add(run.id);
+      if (
+        run.parentRunId &&
+        included.has(run.parentRunId) &&
+        !included.has(run.runId)
+      ) {
+        included.add(run.runId);
         changed = true;
       }
     }
   }
-  return runs.filter((run) => included.has(run.id));
+  return runs.filter((run) => included.has(run.runId));
 }
 
 export function activeAgentTree(runs: AgentRunSnapshot[]): AgentRunSnapshot[] {
-  const ids = new Set(runs.map((run) => run.id));
-  const roots = runs.filter((run) => !run.parentId || !ids.has(run.parentId));
+  const ids = new Set(runs.map((run) => run.runId));
+  const roots = runs.filter(
+    (run) => !run.parentRunId || !ids.has(run.parentRunId),
+  );
   const activeRoots = roots.filter((root) =>
-    agentSubtree(runs, root.id).some((run) => run.status === "running"),
+    agentSubtree(runs, root.runId).some(
+      (run) => run.status === "running" || run.status === "waiting",
+    ),
   );
   const included = new Set(
     activeRoots.flatMap((root) =>
-      agentSubtree(runs, root.id).map((run) => run.id),
+      agentSubtree(runs, root.runId).map((run) => run.runId),
     ),
   );
-  return runs.filter((run) => included.has(run.id));
+  return runs.filter((run) => included.has(run.runId));
 }
 
 export function renderAgentTree(
@@ -174,10 +194,10 @@ export function renderAgentTree(
 ): string[] {
   if (runs.length === 0 || width <= 0) return [];
   const byParent = new Map<string | undefined, AgentRunSnapshot[]>();
-  const ids = new Set(runs.map((run) => run.id));
+  const ids = new Set(runs.map((run) => run.runId));
   for (const run of runs) {
     const parent =
-      run.parentId && ids.has(run.parentId) ? run.parentId : undefined;
+      run.parentRunId && ids.has(run.parentRunId) ? run.parentRunId : undefined;
     const siblings = byParent.get(parent) ?? [];
     siblings.push(run);
     byParent.set(parent, siblings);
@@ -197,7 +217,9 @@ export function renderAgentTree(
     total.outputTokens +
     total.cacheReadTokens +
     total.cacheWriteTokens;
-  const running = runs.filter((run) => run.status === "running").length;
+  const running = runs.filter(
+    (run) => run.status === "running" || run.status === "waiting",
+  ).length;
   const completed = runs.filter((run) => run.status === "completed").length;
   const cost =
     total.costUsd === undefined ? "n/a" : `$${total.costUsd.toFixed(2)}`;
@@ -215,7 +237,7 @@ export function renderAgentTree(
   ) => {
     const elapsed = formatDuration(run.startedAt, run.endedAt ?? now);
     lines.push(
-      `${prefix}${connector}${status(run, theme)} ${theme.accent(theme.bold(run.agent))} ${theme.muted(`${run.harness}/${run.model}`)} ${theme.dim(`think:${run.thinking} ${elapsed}`)}`,
+      `${prefix}${connector}${status(run, theme)} ${theme.accent(theme.bold(`${run.agent}:${run.id}`))} ${theme.muted(`${run.harness}/${run.model}`)} ${theme.dim(`think:${run.thinking} ${elapsed}`)}`,
     );
     const continuation = connector ? `${prefix}${last ? "    " : "|   "}` : "";
     lines.push(`${continuation}|  ${theme.dim(formatUsage(run.usage))}`);
@@ -236,7 +258,7 @@ export function renderAgentTree(
               : "";
       lines.push(`${continuation}|  ${marker} ${theme.dim(activity.text)}`);
     }
-    const children = byParent.get(run.id) ?? [];
+    const children = byParent.get(run.runId) ?? [];
     children.forEach((child, index) =>
       append(
         child,
