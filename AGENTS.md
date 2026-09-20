@@ -1,18 +1,53 @@
 # AGENTS.md
 
-Global `~/AGENTS.md` applies. This file defines project-specific instructions.
+`~/AGENTS.md` applies.
 
 ## Project
 
 - `pi-subagents` is only a sub-agent runtime and Pi extension.
+- Pi lifecycle, tools, commands, and presentation belong in `extensions/pi-subagents/`.
+- Harness protocol parsing stays behind harness adapters.
+- Process ownership and state stay independent from presentation.
 
-## Workflow
+## Work
 
-- Inspect installed Pi documentation and examples before changing Pi APIs.
-- Use strict TypeScript and Prettier.
+- Use Pair by default. Use `pi-implement` for approved implementation work.
+- Read installed Pi documentation, examples, owning code, callers, and closest checks before proposing changes.
+- State the end state, what dies, what may break, and what must fail loudly.
+- Map one feature slice: owner, entry point, inputs, state, outputs, lifecycle, callers, and proof.
+- Stop for interfaces, names, defaults, precedence, ownership, lifecycle, and failure policy.
+- Continue approved mechanical work. Do not ask only whether to continue.
+- Do not edit while answering a question.
+- At stops use `Delta`, `Verified`, and `Next`. Put one decision question on its own final line.
+- Work on `master`. Use Sprout only when the user requests an isolated worktree.
+- Stage explicit paths. Never leave the index staged across tool calls.
+
+## Implementation gate
+
+Before code edits, show exact paths and lines, existing types and functions, proposed types, fields, functions, and signatures, a compact before and after caller/callee graph, and the behavior or failure the proof will observe. Wait for approval before adding a type, function, or test. Continue an approved design directly.
+
+## Change policy
+
+- Replace obsolete internal interfaces. Delete old paths, adapters, aliases, and tests.
+- Do not add speculative compatibility, abstractions, fallbacks, or configuration.
+- Change the owning interface first. Use type errors and searches to update every caller.
+- Treat worker identity, process ownership, cancellation, bounds, and terminal states as correctness boundaries.
+- Use exact process IDs or recorded process-group IDs. Never use broad process matching.
+- Keep Claude workers as leaves through enforced tool configuration.
+- Do not make tmux part of normal execution.
 - Put Pi APIs in `peerDependencies`. Put runtime libraries in `dependencies`.
+
+## Comments
+
+Do not write comments in code. Use clear names, focused functions, types, and tests instead. Delete code comments encountered in changed code. `nix flake check` enforces this for TypeScript and JavaScript source.
+
+## Evidence
+
+- Report Claim, Evidence (`path:line`), Change, Blast radius, and Verification. Label unverified claims.
+- Reproduce defects before fixing them and preserve useful before and after evidence.
+- Add tests only for named stable behavior, an invariant, or a reproduced failure.
 - Prefer focused unit tests for protocol normalization and process lifecycle.
-- Run the cheapest relevant check during work. Run `npm run check` before completion.
+- Run the cheapest affected check during work. Run `npm run check` before completion.
 
 ## Commands
 

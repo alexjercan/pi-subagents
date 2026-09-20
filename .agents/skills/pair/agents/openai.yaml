@@ -1,0 +1,8 @@
+interface:
+  display_name: "Pair"
+  short_description: "Code-backed pairing with explicit design gates"
+  default_prompt: >-
+    Use $pair to inspect code first, show proposed interfaces and call graphs,
+    validate new types, functions, and tests, then continue approved work.
+policy:
+  allow_implicit_invocation: true
