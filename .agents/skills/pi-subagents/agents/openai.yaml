@@ -1,7 +1,0 @@
-interface:
-  display_name: "Pi Subagents"
-  short_description: "Build the focused sub-agent runtime"
-  default_prompt: >-
-    Use $pi-subagents to implement and verify this sub-agent runtime change.
-policy:
-  allow_implicit_invocation: true

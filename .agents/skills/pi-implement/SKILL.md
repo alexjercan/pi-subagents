@@ -1,13 +1,11 @@
 ---
-name: pi-subagents
-description: Implement and review the focused Pi sub-agent runtime and extension.
+name: pi-implement
+description: Implement and verify changes to the Pi sub-agent extension.
 ---
 
-# Pi Subagents
+# Pi Implement
 
-Follow [AGENTS.md](../../../AGENTS.md) and read
-[the architecture](../../../docs/architecture.md) before changing worker
-lifecycle or ownership.
+Follow [AGENTS.md](../../../AGENTS.md). Use this skill by default for implementation work.
 
 ## Ground the change
 
@@ -16,8 +14,8 @@ lifecycle or ownership.
 2. Read the closest Pi example and the owning project files.
 3. State the lifecycle transition, ownership rule, bounds, and failure behavior
    affected by the change.
-4. Keep harness parsing behind its adapter and keep UI state derived from the
-   worker registry.
+4. Keep harness parsing behind its adapter and presentation state derived from
+   the worker registry.
 
 ## Deliver
 

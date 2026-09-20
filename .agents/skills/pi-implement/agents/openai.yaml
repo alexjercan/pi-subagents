@@ -1,0 +1,7 @@
+interface:
+  display_name: "Pi Implement"
+  short_description: "Implement and verify Pi extension changes"
+  default_prompt: >-
+    Use $pi-implement to implement and verify this Pi extension change.
+policy:
+  allow_implicit_invocation: true
