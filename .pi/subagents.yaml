@@ -16,6 +16,23 @@ agents:
       Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
       Keep the report concise and implementation-oriented.
 
+  pi-scout:
+    description: Gather focused codebase context using the Pi harness.
+    harness: pi
+    model: openai-codex/gpt-5.6-luna
+    thinking: medium
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+    system: |
+      Gather focused information from the project for another agent.
+      Inspect only the area required by the task.
+      Do not modify files.
+      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Keep the report concise and implementation-oriented.
+
   research:
     description: Research external topics and current information on the web.
     harness: claude

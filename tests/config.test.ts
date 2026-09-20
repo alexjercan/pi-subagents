@@ -121,7 +121,7 @@ test("Untrusted project configuration is not read", async () => {
   }
 });
 
-test("Repository profiles define scout, research, worker, and review roles", async () => {
+test("Repository profiles define configured agent roles", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-empty-agent-"));
   try {
     const loaded = await loadAgentProfiles({
@@ -141,6 +141,13 @@ test("Repository profiles define scout, research, worker, and review roles", asy
         {
           name: "scout",
           model: "haiku",
+          thinking: "medium",
+          tools: ["read", "ls", "grep", "find"],
+          delegates: [],
+        },
+        {
+          name: "pi-scout",
+          model: "openai-codex/gpt-5.6-luna",
           thinking: "medium",
           tools: ["read", "ls", "grep", "find"],
           delegates: [],
