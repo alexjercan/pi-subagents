@@ -2,20 +2,38 @@ import { randomUUID } from "node:crypto";
 import { loadAgentProfiles, type LoadAgentProfilesOptions } from "./config.ts";
 import {
   spawnHarness,
+  type ClaudeThinkingLevel,
   type HarnessEvent,
   type HarnessResult,
   type HarnessRun,
+  type HarnessUsage,
+  type PiThinkingLevel,
 } from "./harness.ts";
 import { createDelegationHost, type DelegationHost } from "./mcp.ts";
 
 export type AgentRunStatus = "running" | "completed" | "failed" | "cancelled";
 
+export interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  contextTokens?: number;
+  costUsd?: number;
+}
+
 export interface AgentRunSnapshot {
   id: string;
   parentId?: string;
   agent: string;
+  harness: "pi" | "claude";
+  model: string;
+  thinking: PiThinkingLevel | ClaudeThinkingLevel;
   pid: number;
   status: AgentRunStatus;
+  startedAt: number;
+  endedAt?: number;
+  usage: AgentUsage;
   events: HarnessEvent[];
   result?: HarnessResult;
   error?: string;
@@ -37,6 +55,27 @@ export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
 }
 
+function mergeUsage(current: AgentUsage, update: HarnessUsage): void {
+  if (update.cumulative) {
+    current.inputTokens = update.inputTokens;
+    current.outputTokens = update.outputTokens;
+    current.cacheReadTokens = update.cacheReadTokens;
+    current.cacheWriteTokens = update.cacheWriteTokens;
+  } else {
+    current.inputTokens += update.inputTokens;
+    current.outputTokens += update.outputTokens;
+    current.cacheReadTokens += update.cacheReadTokens;
+    current.cacheWriteTokens += update.cacheWriteTokens;
+  }
+  if (update.contextTokens !== undefined)
+    current.contextTokens = update.contextTokens;
+  if (update.costUsd !== undefined) {
+    current.costUsd = update.cumulative
+      ? update.costUsd
+      : (current.costUsd ?? 0) + update.costUsd;
+  }
+}
+
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
@@ -47,6 +86,7 @@ export async function createAgentRuntime(
   const list = () =>
     [...snapshots.values()].map((snapshot) => ({
       ...snapshot,
+      usage: { ...snapshot.usage },
       events: [...snapshot.events],
     }));
   const emit = () => options.onUpdate?.(list());
@@ -100,6 +140,7 @@ export async function createAgentRuntime(
         (event) => {
           const snapshot = snapshots.get(id);
           if (!snapshot) return;
+          if (event.type === "usage") mergeUsage(snapshot.usage, event.usage);
           snapshot.events.push(event);
           emit();
         },
@@ -114,8 +155,18 @@ export async function createAgentRuntime(
       id,
       parentId,
       agent,
+      harness: profile.config.harness,
+      model: profile.config.model,
+      thinking: profile.config.thinking,
       pid: harnessRun.pid,
       status: "running",
+      startedAt: Date.now(),
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
       events: [],
     };
     snapshots.set(id, snapshot);
@@ -138,7 +189,11 @@ export async function createAgentRuntime(
         throw new Error(snapshot.error);
       }
       snapshot.status = "completed";
-      return { ...snapshot, events: [...snapshot.events] };
+      return {
+        ...snapshot,
+        usage: { ...snapshot.usage },
+        events: [...snapshot.events],
+      };
     } catch (error) {
       if (snapshot.status === "running") {
         snapshot.status = controller.signal.aborted ? "cancelled" : "failed";
@@ -146,6 +201,7 @@ export async function createAgentRuntime(
       }
       throw error;
     } finally {
+      snapshot.endedAt = Date.now();
       active.delete(id);
       if (authorization) host.revoke(authorization);
       signal.removeEventListener("abort", abort);

@@ -6,6 +6,7 @@ import type {
 } from "../harness.ts";
 import {
   message,
+  number,
   record,
   string,
   textContent,
@@ -86,7 +87,21 @@ export function normalizePiRecord(value: unknown): NormalizedRecord {
     { type: "message", message: normalizedMessage },
   ];
   const usage = record(normalizedMessage.value.usage);
-  if (usage) events.push({ type: "usage", usage });
+  if (usage) {
+    const cost = record(usage.cost);
+    events.push({
+      type: "usage",
+      usage: {
+        inputTokens: number(usage.input) ?? 0,
+        outputTokens: number(usage.output) ?? 0,
+        cacheReadTokens: number(usage.cacheRead) ?? 0,
+        cacheWriteTokens: number(usage.cacheWrite) ?? 0,
+        contextTokens: number(usage.totalTokens),
+        costUsd: number(cost?.total),
+        cumulative: false,
+      },
+    });
+  }
   const finalText =
     normalizedMessage.role === "assistant"
       ? textContent(normalizedMessage.content)

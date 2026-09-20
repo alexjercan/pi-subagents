@@ -37,6 +37,16 @@ export interface HarnessMessage {
   value: Record<string, unknown>;
 }
 
+export interface HarnessUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  contextTokens?: number;
+  costUsd?: number;
+  cumulative: boolean;
+}
+
 export type HarnessEvent =
   | { type: "message"; message: HarnessMessage }
   | { type: "tool_start"; id: string; name: string; input: unknown }
@@ -47,7 +57,7 @@ export type HarnessEvent =
       output: unknown;
       isError: boolean;
     }
-  | { type: "usage"; usage: Record<string, unknown> };
+  | { type: "usage"; usage: HarnessUsage };
 
 export interface HarnessResult {
   exitCode: number | null;

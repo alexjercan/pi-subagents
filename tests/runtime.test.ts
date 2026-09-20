@@ -60,7 +60,8 @@ if (model === "opus") {
   result = "worker received " + response.content[0].text;
   await client.close();
 }
-process.stdout.write(JSON.stringify({ type: "result", result, usage: { output_tokens: 1 } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "working" }], usage: { input_tokens: 10, output_tokens: 2 } } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", result, usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.1 }) + "\\n");
 `;
   const claude = join(bin, "claude");
   await writeFile(claude, fixture);
@@ -85,6 +86,13 @@ process.stdout.write(JSON.stringify({ type: "result", result, usage: { output_to
     const worker = runs.find((run) => run.agent === "worker");
     const scout = runs.find((run) => run.agent === "scout");
     assert.equal(worker?.status, "completed");
+    assert.equal(worker?.model, "opus");
+    assert.equal(worker?.thinking, "medium");
+    assert.equal(worker?.usage.inputTokens, 10);
+    assert.equal(worker?.usage.outputTokens, 3);
+    assert.equal(worker?.usage.contextTokens, 12);
+    assert.equal(worker?.usage.costUsd, 0.1);
+    assert.ok(worker?.endedAt);
     assert.equal(scout?.status, "completed");
     assert.equal(scout?.parentId, worker?.id);
   } finally {

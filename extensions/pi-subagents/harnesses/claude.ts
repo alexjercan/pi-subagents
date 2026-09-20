@@ -7,6 +7,7 @@ import type {
 import {
   boolean,
   message,
+  number,
   record,
   string,
   textContent,
@@ -15,6 +16,31 @@ import {
 } from "../protocol.ts";
 
 type ClaudeConfig = Extract<HarnessConfig, { harness: "claude" }>;
+
+function usage(
+  value: Record<string, unknown>,
+  cumulative: boolean,
+  costUsd?: number,
+) {
+  const inputTokens = number(value.input_tokens) ?? 0;
+  const outputTokens = number(value.output_tokens) ?? 0;
+  const cacheReadTokens = number(value.cache_read_input_tokens) ?? 0;
+  const cacheWriteTokens = number(value.cache_creation_input_tokens) ?? 0;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    ...(cumulative
+      ? {}
+      : {
+          contextTokens:
+            inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+        }),
+    ...(costUsd === undefined ? {} : { costUsd }),
+    cumulative,
+  };
+}
 
 export function createClaudeAdapter(
   request: HarnessRequest,
@@ -100,9 +126,17 @@ export function normalizeClaudeRecord(
   if (!event || !type) return { events: [] };
 
   if (type === "result") {
-    const usage = record(event.usage);
+    const resultUsage = record(event.usage);
+    const costUsd = number(event.total_cost_usd);
     return {
-      events: usage ? [{ type: "usage", usage }] : [],
+      events: resultUsage
+        ? [
+            {
+              type: "usage",
+              usage: usage(resultUsage, true, costUsd),
+            },
+          ]
+        : [],
       finalText: string(event.result),
     };
   }
@@ -138,8 +172,9 @@ export function normalizeClaudeRecord(
     }
   }
 
-  const usage = record(normalizedMessage.value.usage);
-  if (usage) events.push({ type: "usage", usage });
+  const messageUsage = record(normalizedMessage.value.usage);
+  if (messageUsage)
+    events.push({ type: "usage", usage: usage(messageUsage, false) });
   const finalText =
     normalizedMessage.role === "assistant"
       ? textContent(normalizedMessage.content)

@@ -29,6 +29,12 @@ export function boolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+export function number(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 export function message(value: unknown): HarnessMessage | undefined {
   const object = record(value);
   const role = string(object?.role);

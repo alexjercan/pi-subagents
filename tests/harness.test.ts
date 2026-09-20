@@ -24,11 +24,11 @@ if (prompt === "malformed") {
   const events = harness === "pi" ? [
     { type: "tool_execution_start", toolCallId: "pi-call", toolName: "read", args: { path: "README.md" } },
     { type: "tool_execution_end", toolCallId: "pi-call", toolName: "read", result: { content: [{ type: "text", text: "read output" }] }, isError: false },
-    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "pi finished" }], usage: { input: 10, output: 2 } } }
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "pi finished" }], usage: { input: 10, output: 2, cacheRead: 4, cacheWrite: 1, totalTokens: 17, cost: { total: 0.25 } } } }
   ] : [
-    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "claude working" }, { type: "tool_use", id: "claude-call", name: "Read", input: { file_path: "README.md" } }], usage: { input_tokens: 12 } } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "claude working" }, { type: "tool_use", id: "claude-call", name: "Read", input: { file_path: "README.md" } }], usage: { input_tokens: 12, output_tokens: 2, cache_read_input_tokens: 5, cache_creation_input_tokens: 1 } } },
     { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "claude-call", content: "read output", is_error: false }] } },
-    { type: "result", result: "claude finished", usage: { output_tokens: 3 } }
+    { type: "result", result: "claude finished", usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 1 }, total_cost_usd: 0.5 }
   ];
   for (const event of events) process.stdout.write(JSON.stringify(event) + "\\n");
 }
@@ -88,6 +88,18 @@ test("Pi emits messages, tool lifecycle, usage, and configured arguments", async
     id: "pi-call",
     name: "read",
     input: { path: "README.md" },
+  });
+  assert.deepEqual(events[3], {
+    type: "usage",
+    usage: {
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadTokens: 4,
+      cacheWriteTokens: 1,
+      contextTokens: 17,
+      costUsd: 0.25,
+      cumulative: false,
+    },
   });
 });
 
@@ -154,12 +166,34 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
     events.map((event) => event.type),
     ["message", "tool_start", "usage", "message", "tool_end", "usage"],
   );
+  assert.deepEqual(events[2], {
+    type: "usage",
+    usage: {
+      inputTokens: 12,
+      outputTokens: 2,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 1,
+      contextTokens: 20,
+      cumulative: false,
+    },
+  });
   assert.deepEqual(events[4], {
     type: "tool_end",
     id: "claude-call",
     name: "Read",
     output: "read output",
     isError: false,
+  });
+  assert.deepEqual(events[5], {
+    type: "usage",
+    usage: {
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 1,
+      costUsd: 0.5,
+      cumulative: true,
+    },
   });
 });
 
