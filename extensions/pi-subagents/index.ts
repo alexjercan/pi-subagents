@@ -101,12 +101,13 @@ export default function piSubagents(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Start a configured direct child and return immediately.",
-    promptSnippet: "Start configured subagents without waiting for completion",
+    description:
+      "Start a configured direct child, end this turn, and wake when the active root cohort completes.",
+    promptSnippet: "Start configured subagents and wait for their completion",
     promptGuidelines: [
-      "Call subagent_list to discover configured agent kinds.",
+      "Call subagent_list only to discover configured agent kinds before delegation.",
       "Use a distinct id for each directly owned subagent.",
-      "Completed subagents wake you with their final output.",
+      "Do not poll or sleep after starting subagents; the turn ends and completed subagents wake you with their final output.",
     ],
     parameters: Type.Object({
       id: Type.String({ minLength: 1, description: "Child identifier" }),
@@ -125,6 +126,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
             },
           ],
           details: { runs: [run] },
+          terminate: true,
         };
       } catch (error) {
         return errorResult(error, runtime.list());
@@ -158,7 +160,8 @@ export default function piSubagents(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "subagent_message",
     label: "Subagent Message",
-    description: "Send a message to a directly owned running subagent.",
+    description:
+      "Send a message to a directly owned subagent and end this turn while it runs.",
     parameters: Type.Object({
       id: Type.String({ minLength: 1, description: "Direct child identifier" }),
       message: Type.String({
@@ -173,6 +176,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: `Message sent to ${params.id}` }],
           details: { runs: runtime.list() },
+          terminate: true,
         };
       } catch (error) {
         return errorResult(error, runtime.list());

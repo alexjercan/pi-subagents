@@ -55,7 +55,8 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Start a configured direct child and return immediately.",
+    description:
+      "Start a configured direct child and wait without polling for completion or a question.",
     parameters: Type.Object({
       id: Type.String({ description: "Owner-scoped child identifier" }),
       name: Type.String({ description: "Configured agent kind" }),
@@ -67,7 +68,8 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "subagent_message",
     label: "Subagent Message",
-    description: "Send a message to a directly owned running child.",
+    description:
+      "Send a message to a directly owned child and wait without polling for its next state.",
     parameters: Type.Object({
       id: Type.String({ description: "Direct child identifier" }),
       message: Type.String({ description: "Message or question response" }),

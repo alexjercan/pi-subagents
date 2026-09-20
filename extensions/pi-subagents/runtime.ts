@@ -140,6 +140,8 @@ export async function createAgentRuntime(
   const active = new Map<string, HarnessRun>();
   const authorizations = new Map<string, string>();
   const questions = new Map<string, PendingQuestion>();
+  const stateWaiters = new Map<string, Set<() => void>>();
+  const rootCompletions: string[] = [];
   let closing = false;
   let host: DelegationHost;
 
@@ -150,6 +152,11 @@ export async function createAgentRuntime(
       events: [...snapshot.events],
     }));
   const emit = () => options.onUpdate?.(list());
+  const signalState = (runId: string) => {
+    const waiters = stateWaiters.get(runId);
+    stateWaiters.delete(runId);
+    for (const resolve of waiters ?? []) resolve();
+  };
   const child = (ownerRunId: string | undefined, id: string) =>
     [...snapshots.values()].find(
       (snapshot) => snapshot.parentRunId === ownerRunId && snapshot.id === id,
@@ -182,23 +189,37 @@ export async function createAgentRuntime(
     return loaded.filter((profile) => allowed.has(profile.name));
   };
 
+  const ownedRun = (snapshot: AgentRunSnapshot): OwnedAgentRun => ({
+    id: snapshot.id,
+    name: snapshot.agent,
+    status: snapshot.status,
+    ...(snapshot.question === undefined ? {} : { question: snapshot.question }),
+    ...(snapshot.result?.finalText
+      ? { finalText: snapshot.result.finalText }
+      : {}),
+    ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+  });
   const inventory = async (ownerRunId?: string): Promise<AgentInventory> => ({
     kinds: (await allowedProfiles(ownerRunId)).map(kind),
     runs: [...snapshots.values()]
       .filter((snapshot) => snapshot.parentRunId === ownerRunId)
-      .map((snapshot) => ({
-        id: snapshot.id,
-        name: snapshot.agent,
-        status: snapshot.status,
-        ...(snapshot.question === undefined
-          ? {}
-          : { question: snapshot.question }),
-        ...(snapshot.result?.finalText
-          ? { finalText: snapshot.result.finalText }
-          : {}),
-        ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
-      })),
+      .map(ownedRun),
   });
+  const waitForChild = async (
+    ownerRunId: string,
+    id: string,
+  ): Promise<OwnedAgentRun> => {
+    const snapshot = child(ownerRunId, id);
+    if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+    while (snapshot.status === "running") {
+      await new Promise<void>((resolve) => {
+        const waiters = stateWaiters.get(snapshot.runId) ?? new Set();
+        waiters.add(resolve);
+        stateWaiters.set(snapshot.runId, waiters);
+      });
+    }
+    return ownedRun(snapshot);
+  };
 
   const message = async (
     ownerRunId: string | undefined,
@@ -234,6 +255,7 @@ export async function createAgentRuntime(
       throw new Error(`Subagent ${snapshot.id} already has a pending question`);
     snapshot.status = "waiting";
     snapshot.question = prompt;
+    signalState(runId);
     emit();
     let rejectQuestion: (error: Error) => void = () => undefined;
     const answer = new Promise<string>((resolve, reject) => {
@@ -303,19 +325,28 @@ export async function createAgentRuntime(
       const authorization = authorizations.get(snapshot.runId);
       if (authorization) host.revoke(authorization);
       authorizations.delete(snapshot.runId);
+      signalState(snapshot.runId);
       emit();
     }
-    if (!closing) {
+    if (!closing && !snapshot.parentRunId) {
       const output =
         snapshot.result?.finalText || snapshot.error || "(no output)";
-      try {
-        await notifyOwner(
-          snapshot,
-          `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
-        );
-      } catch (error) {
-        snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
-        emit();
+      rootCompletions.push(
+        `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+      );
+      const rootsRunning = [...snapshots.values()].some(
+        (candidate) =>
+          !candidate.parentRunId &&
+          (candidate.status === "running" || candidate.status === "waiting"),
+      );
+      if (!rootsRunning) {
+        const message = rootCompletions.splice(0).join("\n\n");
+        try {
+          await options.onRootMessage?.(message);
+        } catch (error) {
+          snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
+          emit();
+        }
       }
     }
   };
@@ -398,9 +429,14 @@ export async function createAgentRuntime(
   };
 
   host = await createDelegationHost({
-    start: (callerRunId, id, name, prompt) =>
-      start({ id, name, prompt, parentRunId: callerRunId }),
-    message: (callerRunId, id, value) => message(callerRunId, id, value),
+    async start(callerRunId, id, name, prompt) {
+      await start({ id, name, prompt, parentRunId: callerRunId });
+      return waitForChild(callerRunId, id);
+    },
+    async message(callerRunId, id, value) {
+      await message(callerRunId, id, value);
+      return waitForChild(callerRunId, id);
+    },
     list: (callerRunId) => inventory(callerRunId),
     ask,
   });

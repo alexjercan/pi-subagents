@@ -24,7 +24,7 @@ export interface DelegationOperations {
     name: string,
     prompt: string,
   ): Promise<unknown>;
-  message(callerRunId: string, id: string, message: string): Promise<void>;
+  message(callerRunId: string, id: string, message: string): Promise<unknown>;
   list(callerRunId: string): Promise<unknown>;
   ask(
     callerRunId: string,
@@ -121,7 +121,8 @@ export async function createDelegationHost(
     server.registerTool(
       "subagent",
       {
-        description: "Start a configured direct child and return immediately.",
+        description:
+          "Start a configured direct child and wait without polling for completion or a question.",
         inputSchema: {
           id: z.string().min(1),
           name: z.string().min(1),
@@ -143,7 +144,8 @@ export async function createDelegationHost(
     server.registerTool(
       "subagent_message",
       {
-        description: "Send a message to a directly owned running child.",
+        description:
+          "Send a message to a directly owned child and wait without polling for its next state.",
         inputSchema: {
           id: z.string().min(1),
           message: z.string().min(1),
@@ -151,8 +153,7 @@ export async function createDelegationHost(
       },
       async ({ id, message }) => {
         try {
-          await operations.message(grant.callerRunId, id, message);
-          return text(`Message sent to ${id}`);
+          return text(await operations.message(grant.callerRunId, id, message));
         } catch (error) {
           return failure(error);
         }

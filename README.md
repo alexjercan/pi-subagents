@@ -13,9 +13,10 @@ pi -e ./extensions/pi-subagents/index.ts
 
 Call `subagent_list` to discover configured agent kinds. Start one with
 `subagent`, using a distinct owner-scoped `id`, configured `name`, and initial
-`prompt`. Starts return immediately. A completed child wakes its owner with its
-final output. Use `subagent_message` to steer a running child or answer a
-pending question. Profiles load from `~/.pi/agent/subagents.yaml` and trusted
+`prompt`. The root turn stops after starting children and wakes once all active
+root children finish. Nested delegation calls wait without polling and return
+the child's final output. Use `subagent_message` to steer a running child or
+answer a pending question. Profiles load from `~/.pi/agent/subagents.yaml` and trusted
 project profiles load from `.pi/subagents.yaml`. Project profiles override user
 profiles with the same name.
 

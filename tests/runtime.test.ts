@@ -10,7 +10,7 @@ async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
-test("Async child completion wakes its direct owner with final output", async () => {
+test("Nested delegation waits for the direct child's final output", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-runtime-"));
   const agentDir = join(root, "agent");
   const cwd = join(root, "project");
@@ -53,8 +53,6 @@ test("Async child completion wakes its direct owner with final output", async ()
 const args = process.argv.slice(2);
 const model = args[args.indexOf("--model") + 1];
 let input = "";
-let started = false;
-let mcpClient;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", async (chunk) => {
   input += chunk;
@@ -63,26 +61,21 @@ process.stdin.on("data", async (chunk) => {
     const line = input.slice(0, newline);
     input = input.slice(newline + 1);
     if (!line) continue;
-    const command = JSON.parse(line);
-    const message = command.message?.content ?? command.message;
+    JSON.parse(line);
     if (model === "haiku") {
       process.stdout.write(JSON.stringify({ type: "result", result: "scout report", usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");
       return;
     }
-    if (!started) {
-      started = true;
-      const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
-      const server = config.mcpServers.pi_subagents;
-      const { Client } = await import(${JSON.stringify(clientUrl)});
-      const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
-      mcpClient = new Client({ name: "fixture", version: "1.0.0" });
-      await mcpClient.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
-      await mcpClient.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Find the implementation" } });
-      continue;
-    }
+    const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+    const server = config.mcpServers.pi_subagents;
+    const { Client } = await import(${JSON.stringify(clientUrl)});
+    const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+    const mcpClient = new Client({ name: "fixture", version: "1.0.0" });
+    await mcpClient.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+    const completed = await mcpClient.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Find the implementation" } });
     const listed = await mcpClient.callTool({ name: "subagent_list", arguments: {} });
     await mcpClient.close();
-    process.stdout.write(JSON.stringify({ type: "result", result: JSON.stringify({ wake: message, inventory: JSON.parse(listed.content[0].text) }), usage: { input_tokens: 2, output_tokens: 2 } }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", result: JSON.stringify({ child: JSON.parse(completed.content[0].text), inventory: JSON.parse(listed.content[0].text) }), usage: { input_tokens: 2, output_tokens: 2 } }) + "\\n");
   }
 });
 `;
@@ -121,16 +114,18 @@ process.stdin.on("data", async (chunk) => {
     const workerResult = JSON.parse(
       completedWorker?.result?.finalText ?? "{}",
     ) as {
-      wake: string;
+      child: { id: string; status: string; finalText: string };
       inventory: {
         kinds: Array<{ name: string }>;
         runs: Array<{ id: string }>;
       };
     };
-    assert.match(
-      workerResult.wake,
-      /Subagent code finished with status completed\.\nscout report/,
-    );
+    assert.deepEqual(workerResult.child, {
+      id: "code",
+      name: "scout",
+      status: "completed",
+      finalText: "scout report",
+    });
     assert.deepEqual(
       workerResult.inventory.kinds.map((agent) => agent.name),
       ["scout"],

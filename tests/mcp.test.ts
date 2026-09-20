@@ -22,7 +22,7 @@ function operations(
 ): DelegationOperations {
   return {
     start: async () => ({ status: "running" }),
-    message: async () => undefined,
+    message: async () => ({ status: "running" }),
     list: async () => ({ kinds: [], runs: [] }),
     ask: async () => "answer",
     ...overrides,
@@ -46,6 +46,7 @@ test("MCP exposes the four subagent tools with direct-owner identity", async () 
       },
       message: async (...args) => {
         messages.push(args);
+        return { status: "running" };
       },
       list: async (callerRunId) => ({
         kinds: [{ name: "scout" }],

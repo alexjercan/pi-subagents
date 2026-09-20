@@ -61,8 +61,8 @@ agents:
       Implement the requested change.
       Before implementation, call subagent_list to inspect the configured delegate kinds.
       Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
-      Continue useful work while delegated tasks run.
-      Completed children will wake you with their final output.
+      Wait after delegation and do not poll or sleep.
+      Completed children return their final output through the delegation tool.
       Use subagent_message to steer a running child or answer its question.
       Use subagent_ask when a decision must come from your owner.
       Do not repeat broad project discovery yourself.

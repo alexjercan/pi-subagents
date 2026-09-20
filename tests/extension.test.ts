@@ -31,7 +31,7 @@ async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
-test("Extension exposes four async tools and clears completed runs", async () => {
+test("Root delegation terminates its turn and wakes after the active cohort", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
   const project = join(directory, "project");
   await mkdir(join(project, ".pi"), { recursive: true });
@@ -51,9 +51,12 @@ test("Extension exposes four async tools and clears completed runs", async () =>
   await writeFile(
     claude,
     `#!/usr/bin/env node
-process.stdin.once("data", () => {
+process.stdin.once("data", (chunk) => {
+  const command = JSON.parse(String(chunk).split("\\n")[0]);
+  const prompt = command.message?.content ?? "";
+  const delay = prompt === "Slow" ? 60 : 20;
   process.stdout.write(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Inspecting" }], usage: { input_tokens: 4, output_tokens: 1 } } }) + "\\n");
-  setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "Done", usage: { input_tokens: 4, output_tokens: 2 }, total_cost_usd: 0.01 }) + "\\n"), 30);
+  setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: prompt + " done", usage: { input_tokens: 4, output_tokens: 2 }, total_cost_usd: 0.01 }) + "\\n"), delay);
 });
 `,
   );
@@ -105,16 +108,28 @@ process.stdin.once("data", () => {
     await handlers.get("session_start")?.({}, context);
     const tool = tools.get("subagent");
     assert.ok(tool);
-    await tool.execute(
-      "call",
-      { id: "inspection", name: "scout", prompt: "Inspect" },
+    const slow = (await tool.execute(
+      "slow-call",
+      { id: "slow", name: "scout", prompt: "Slow" },
       new AbortController().signal,
       undefined,
       context,
-    );
+    )) as { terminate?: boolean };
+    const fast = (await tool.execute(
+      "fast-call",
+      { id: "fast", name: "scout", prompt: "Fast" },
+      new AbortController().signal,
+      undefined,
+      context,
+    )) as { terminate?: boolean };
+    assert.equal(slow.terminate, true);
+    assert.equal(fast.terminate, true);
     assert.ok(widgets.some((value) => typeof value === "function"));
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    assert.equal(messages.length, 0);
     await until(() => widgets.at(-1) === undefined && messages.length === 1);
-    assert.match(JSON.stringify(messages[0]), /Subagent inspection finished/);
+    assert.match(JSON.stringify(messages[0]), /Subagent fast finished/);
+    assert.match(JSON.stringify(messages[0]), /Subagent slow finished/);
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
   } finally {
