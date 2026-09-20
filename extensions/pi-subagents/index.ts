@@ -70,12 +70,18 @@ export default function piSubagents(pi: ExtensionAPI): void {
       }
       ctx.ui.setWidget("pi-subagents", (_tui, theme) => ({
         render: (width) =>
-          renderAgentTree(widgetRuns, width, colors(theme), Date.now()),
+          renderAgentTree(
+            widgetRuns,
+            width,
+            colors(theme),
+            Date.now(),
+            "active",
+          ),
         invalidate() {},
       }));
     };
     const setWidget = (runs: AgentRunSnapshot[]) => {
-      widgetRuns = activeAgentTree(runs);
+      widgetRuns = activeAgentTree(runs).length > 0 ? runs : [];
       refreshWidget();
       if (ctx.mode === "tui" && widgetRuns.length > 0 && !widgetTimer)
         widgetTimer = setInterval(refreshWidget, 1000);

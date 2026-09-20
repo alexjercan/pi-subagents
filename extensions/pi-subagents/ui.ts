@@ -191,11 +191,14 @@ export function renderAgentTree(
   width: number,
   theme: AgentTreeTheme,
   now: number,
+  rows: "all" | "active" = "all",
 ): string[] {
   if (runs.length === 0 || width <= 0) return [];
+  const displayedRuns = rows === "active" ? activeAgentTree(runs) : runs;
+  if (displayedRuns.length === 0) return [];
   const byParent = new Map<string | undefined, AgentRunSnapshot[]>();
-  const ids = new Set(runs.map((run) => run.runId));
-  for (const run of runs) {
+  const ids = new Set(displayedRuns.map((run) => run.runId));
+  for (const run of displayedRuns) {
     const parent =
       run.parentRunId && ids.has(run.parentRunId) ? run.parentRunId : undefined;
     const siblings = byParent.get(parent) ?? [];
@@ -205,27 +208,26 @@ export function renderAgentTree(
   for (const siblings of byParent.values())
     siblings.sort((left, right) => left.startedAt - right.startedAt);
 
-  const total: AgentUsage = {
+  const usage: AgentUsage = {
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
   };
-  for (const run of runs) addUsage(total, run.usage);
+  for (const run of runs) addUsage(usage, run.usage);
   const tokenTotal =
-    total.inputTokens +
-    total.outputTokens +
-    total.cacheReadTokens +
-    total.cacheWriteTokens;
-  const running = runs.filter(
-    (run) => run.status === "running" || run.status === "waiting",
+    usage.inputTokens +
+    usage.outputTokens +
+    usage.cacheReadTokens +
+    usage.cacheWriteTokens;
+  const completed = runs.filter(
+    (run) => run.status !== "running" && run.status !== "waiting",
   ).length;
-  const completed = runs.filter((run) => run.status === "completed").length;
   const cost =
-    total.costUsd === undefined ? "n/a" : `$${total.costUsd.toFixed(2)}`;
+    usage.costUsd === undefined ? "n/a" : `$${usage.costUsd.toFixed(2)}`;
   const lines = [
     theme.bold(
-      `Subagents  running: ${running}  completed: ${completed}  tokens: ${formatCount(tokenTotal)}  cost: ${cost}`,
+      `Subagents  total: ${runs.length}  completed: ${completed}  tokens: ${formatCount(tokenTotal)}  cost: ${cost}`,
     ),
   ];
 

@@ -86,7 +86,7 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
     }),
   ];
   const lines = renderAgentTree(runs, 120, theme, 61000);
-  assert.match(lines[0] ?? "", /running: 1  completed: 2/);
+  assert.match(lines[0] ?? "", /total: 3  completed: 2/);
   assert.match(lines[1] ?? "", /worker:worker claude\/opus think:high 01:00/);
   assert.match(lines[2] ?? "", /ctx 1.6k \| in 1.0k.*\$0.12/);
   const scout = lines.findIndex((line) => line.includes("scout"));
@@ -95,6 +95,24 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
   assert.ok(review > scout);
   assert.match(lines[scout] ?? "", /\+-- \[ok\] scout:earlier/);
   assert.match(lines[review] ?? "", /`-- \[ok\] review:later/);
+});
+
+test("Active agent tree retains cumulative session totals", () => {
+  const runs = [
+    run({ id: "completed", agent: "scout" }),
+    run({ id: "failed", agent: "review", status: "failed" }),
+    run({ id: "cancelled", agent: "worker", status: "cancelled" }),
+    run({ id: "active", agent: "scout", status: "running" }),
+  ];
+  const lines = renderAgentTree(runs, 120, theme, 5000, "active");
+  assert.match(
+    lines[0] ?? "",
+    /total: 4  completed: 3  tokens: 6.4k  cost: \$0.48/,
+  );
+  assert.ok(lines.some((line) => line.includes("scout:active")));
+  assert.ok(lines.every((line) => !line.includes("scout:completed")));
+  assert.ok(lines.every((line) => !line.includes("review:failed")));
+  assert.ok(lines.every((line) => !line.includes("worker:cancelled")));
 });
 
 test("Agent tree keeps three recent one-line activities", () => {

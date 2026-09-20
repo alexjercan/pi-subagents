@@ -28,6 +28,12 @@ interface TestTheme {
   bold(text: string): string;
 }
 
+interface TestWidget {
+  render(width: number): string[];
+}
+
+type TestWidgetFactory = (tui: unknown, theme: TestTheme) => TestWidget;
+
 interface RegisteredTool {
   name: string;
   execute(
@@ -129,6 +135,7 @@ process.stdin.once("data", (chunk) => {
     },
   } as unknown as ExtensionAPI;
   const widgets: unknown[] = [];
+  const widgetRenders: string[][] = [];
   const inputs: Array<{ title: string; placeholder: string }> = [];
   const context: TestContext = {
     cwd: project,
@@ -137,6 +144,10 @@ process.stdin.once("data", (chunk) => {
     ui: {
       setWidget(_name, value) {
         widgets.push(value);
+        if (typeof value === "function")
+          widgetRenders.push(
+            (value as TestWidgetFactory)(undefined, theme).render(120),
+          );
       },
       input: async (title, placeholder) => {
         inputs.push({ title, placeholder });
@@ -215,6 +226,17 @@ process.stdin.once("data", (chunk) => {
     assert.ok(widgets.some((value) => typeof value === "function"));
     await new Promise((resolve) => setTimeout(resolve, 35));
     assert.equal(messages.length, 0);
+    await until(
+      () =>
+        widgetRenders.some((lines) =>
+          /total: 2  completed: 1/.test(lines[0] ?? ""),
+        ) || widgets.at(-1) === undefined,
+    );
+    assert.ok(
+      widgetRenders.some((lines) =>
+        /total: 2  completed: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
+      ),
+    );
     await until(() => widgets.at(-1) === undefined && messages.length === 1);
     assert.match(JSON.stringify(messages[0]), /Subagent fast finished/);
     assert.match(JSON.stringify(messages[0]), /Subagent slow finished/);
