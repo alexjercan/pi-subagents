@@ -1,6 +1,7 @@
 import type {
   HarnessConfig,
   HarnessEvent,
+  HarnessLaunchOptions,
   HarnessRequest,
 } from "../harness.ts";
 import {
@@ -18,26 +19,65 @@ type ClaudeConfig = Extract<HarnessConfig, { harness: "claude" }>;
 export function createClaudeAdapter(
   request: HarnessRequest,
   config: ClaudeConfig,
+  options: HarnessLaunchOptions,
 ): HarnessAdapter {
   const toolNames = new Map<string, string>();
+  const claudeTools = new Map([
+    ["read", "Read"],
+    ["grep", "Grep"],
+    ["find", "Glob"],
+    ["ls", "Glob"],
+    ["bash", "Bash"],
+    ["edit", "Edit"],
+    ["write", "Write"],
+    ["web_search", "WebSearch"],
+    ["web_fetch", "WebFetch"],
+  ]);
+  const args = [
+    "--print",
+    "--no-session-persistence",
+    "--model",
+    config.model,
+    "--effort",
+    config.thinking,
+    "--permission-mode",
+    "bypassPermissions",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--append-system-prompt",
+    options.system,
+  ];
+  if (options.tools !== undefined) {
+    const mapped = [
+      ...new Set(options.tools.map((tool) => claudeTools.get(tool))),
+    ];
+    args.push("--tools", mapped.join(","));
+  }
+  if (options.delegation) {
+    args.push(
+      "--mcp-config",
+      JSON.stringify({
+        mcpServers: {
+          pi_subagents: {
+            type: "http",
+            url: options.delegation.url,
+            headers: { Authorization: options.delegation.authorization },
+          },
+        },
+      }),
+      "--strict-mcp-config",
+      "--allowedTools",
+      "mcp__pi_subagents__spawn",
+      "--disallowedTools",
+      "Task,Agent",
+    );
+  }
+  args.push("--", request.prompt);
   return {
     process: {
       command: "claude",
-      args: [
-        "--print",
-        "--no-session-persistence",
-        "--model",
-        config.model,
-        "--effort",
-        config.thinking,
-        "--permission-mode",
-        "bypassPermissions",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--",
-        request.prompt,
-      ],
+      args,
       cwd: request.cwd,
       env: {
         ...process.env,

@@ -1,6 +1,7 @@
 import type {
   HarnessConfig,
   HarnessEvent,
+  HarnessLaunchOptions,
   HarnessRequest,
 } from "../harness.ts";
 import {
@@ -17,22 +18,29 @@ type PiConfig = Extract<HarnessConfig, { harness: "pi" }>;
 export function createPiAdapter(
   request: HarnessRequest,
   config: PiConfig,
+  options: HarnessLaunchOptions,
 ): HarnessAdapter {
+  const args = [
+    "--print",
+    "--no-session",
+    "--mode",
+    "json",
+    "--model",
+    config.model,
+    "--thinking",
+    config.thinking,
+    "--append-system-prompt",
+    options.system,
+  ];
+  if (options.tools !== undefined) {
+    if (options.tools.length === 0) args.push("--no-tools");
+    else args.push("--tools", options.tools.join(","));
+  }
+  args.push("--", request.prompt);
   return {
     process: {
       command: "pi",
-      args: [
-        "--print",
-        "--no-session",
-        "--mode",
-        "json",
-        "--model",
-        config.model,
-        "--thinking",
-        config.thinking,
-        "--",
-        request.prompt,
-      ],
+      args,
       cwd: request.cwd,
     },
     normalize: normalizePiRecord,

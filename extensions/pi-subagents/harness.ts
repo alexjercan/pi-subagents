@@ -1,5 +1,6 @@
 import { createClaudeAdapter } from "./harnesses/claude.ts";
 import { createPiAdapter } from "./harnesses/pi.ts";
+import type { AgentTool } from "./config.ts";
 import { spawnJsonlProcess } from "./process.ts";
 
 export type PiThinkingLevel =
@@ -19,6 +20,15 @@ export type HarnessConfig =
 export interface HarnessRequest {
   cwd: string;
   prompt: string;
+}
+
+export interface HarnessLaunchOptions {
+  system: string;
+  tools?: AgentTool[];
+  delegation?: {
+    url: string;
+    authorization: string;
+  };
 }
 
 export interface HarnessMessage {
@@ -55,12 +65,13 @@ export interface HarnessRun {
 export function spawnHarness(
   request: HarnessRequest,
   config: HarnessConfig,
+  options: HarnessLaunchOptions,
   onEvent: (event: HarnessEvent) => void,
 ): HarnessRun {
   const adapter =
     config.harness === "pi"
-      ? createPiAdapter(request, config)
-      : createClaudeAdapter(request, config);
+      ? createPiAdapter(request, config, options)
+      : createClaudeAdapter(request, config, options);
   let finalText = "";
   const processRun = spawnJsonlProcess(adapter.process, (value) => {
     const normalized = adapter.normalize(value);

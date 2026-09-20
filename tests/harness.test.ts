@@ -55,6 +55,7 @@ test("Pi emits messages, tool lifecycle, usage, and configured arguments", async
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "inspect" },
     { harness: "pi", model: "openai/gpt-test", thinking: "medium" },
+    { system: "Inspect carefully.", tools: ["read", "grep"] },
     (event) => events.push(event),
   );
   const result = await run.completion;
@@ -71,6 +72,12 @@ test("Pi emits messages, tool lifecycle, usage, and configured arguments", async
     "openai/gpt-test",
     "--thinking",
     "medium",
+  ]);
+  assert.deepEqual(invocation.args.slice(8, 12), [
+    "--append-system-prompt",
+    "Inspect carefully.",
+    "--tools",
+    "read,grep",
   ]);
   assert.deepEqual(
     events.map((event) => event.type),
@@ -89,6 +96,14 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "inspect" },
     { harness: "claude", model: "sonnet", thinking: "high" },
+    {
+      system: "Implement carefully.",
+      tools: ["read", "ls", "find", "web_search"],
+      delegation: {
+        url: "http://127.0.0.1:1234/mcp",
+        authorization: "Bearer secret",
+      },
+    },
     (event) => events.push(event),
   );
   const result = await run.completion;
@@ -112,6 +127,29 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
     "--permission-mode",
     "bypassPermissions",
   ]);
+  assert.deepEqual(invocation.args.slice(11, 15), [
+    "--append-system-prompt",
+    "Implement carefully.",
+    "--tools",
+    "Read,Glob,WebSearch",
+  ]);
+  const mcpConfig = JSON.parse(
+    invocation.args[invocation.args.indexOf("--mcp-config") + 1] ?? "",
+  ) as Record<string, unknown>;
+  assert.deepEqual(mcpConfig, {
+    mcpServers: {
+      pi_subagents: {
+        type: "http",
+        url: "http://127.0.0.1:1234/mcp",
+        headers: { Authorization: "Bearer secret" },
+      },
+    },
+  });
+  assert.ok(invocation.args.includes("--strict-mcp-config"));
+  assert.deepEqual(
+    invocation.args.slice(invocation.args.indexOf("--disallowedTools"), -2),
+    ["--disallowedTools", "Task,Agent"],
+  );
   assert.deepEqual(
     events.map((event) => event.type),
     ["message", "tool_start", "usage", "message", "tool_end", "usage"],
@@ -129,6 +167,7 @@ test("Malformed harness output rejects completion", async () => {
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "malformed" },
     { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    { system: "Inspect." },
     () => undefined,
   );
   await assert.rejects(run.completion, SyntaxError);
@@ -138,6 +177,7 @@ test("Stopping a harness terminates its process", async () => {
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "wait" },
     { harness: "claude", model: "sonnet", thinking: "medium" },
+    { system: "Wait." },
     () => undefined,
   );
   run.stop();
