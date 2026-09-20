@@ -3,6 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   createAgentRuntime,
+  type AgentInventory,
   type AgentRunSnapshot,
   type AgentRuntime,
 } from "./runtime.ts";
@@ -10,6 +11,8 @@ import { activeAgentTree, renderAgentTree, type AgentTreeTheme } from "./ui.ts";
 
 interface SubagentDetails {
   runs: AgentRunSnapshot[];
+  inventory?: AgentInventory;
+  error?: boolean;
 }
 
 function colors(theme: Theme): AgentTreeTheme {
@@ -24,7 +27,14 @@ function colors(theme: Theme): AgentTreeTheme {
   };
 }
 
-function errorResult(error: unknown, runs: AgentRunSnapshot[] = []) {
+function errorResult(
+  error: unknown,
+  runs: AgentRunSnapshot[] = [],
+): {
+  content: Array<{ type: "text"; text: string }>;
+  details: SubagentDetails;
+  isError: true;
+} {
   return {
     content: [
       {
@@ -32,7 +42,7 @@ function errorResult(error: unknown, runs: AgentRunSnapshot[] = []) {
         text: error instanceof Error ? error.message : String(error),
       },
     ],
-    details: { runs },
+    details: { runs, error: true },
     isError: true,
   };
 }
@@ -140,20 +150,17 @@ export default function piSubagents(pi: ExtensionAPI): void {
       );
     },
     renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const fallback = content?.type === "text" ? content.text : "(no output)";
       const details = result.details as SubagentDetails | undefined;
-      if (!details || details.runs.length === 0) {
-        const content = result.content[0];
-        return new Text(
-          content?.type === "text" ? content.text : "(no output)",
-          0,
-          0,
-        );
-      }
-      return {
-        render: (width: number) =>
-          renderAgentTree(details.runs, width, colors(theme), Date.now()),
-        invalidate() {},
-      };
+      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
+      const run = details?.runs[0];
+      if (!run) return new Text(fallback, 0, 0);
+      return new Text(
+        `${theme.fg("success", "started")} ${theme.fg("accent", run.id)} ${theme.fg("muted", `(${run.agent})`)}`,
+        0,
+        0,
+      );
     },
   });
 
@@ -182,6 +189,12 @@ export default function piSubagents(pi: ExtensionAPI): void {
         return errorResult(error, runtime.list());
       }
     },
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const text = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      return new Text(theme.fg(details?.error ? "error" : "muted", text), 0, 0);
+    },
   });
 
   pi.registerTool({
@@ -195,11 +208,29 @@ export default function piSubagents(pi: ExtensionAPI): void {
         const inventory = await runtime.inventory();
         return {
           content: [{ type: "text", text: JSON.stringify(inventory) }],
-          details: { runs: runtime.list() },
+          details: { runs: runtime.list(), inventory },
         };
       } catch (error) {
         return errorResult(error, runtime.list());
       }
+    },
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const fallback = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
+      if (!details?.inventory) return new Text(fallback, 0, 0);
+      const kinds = details.inventory.kinds.map((kind) => kind.name);
+      const runs = details.inventory.runs.map(
+        (run) => `${run.id} (${run.name}) [${run.status}]`,
+      );
+      const kindLine = `${kinds.length} ${kinds.length === 1 ? "kind" : "kinds"}: ${kinds.join(", ") || "none"}`;
+      const runLine = `${runs.length} ${runs.length === 1 ? "run" : "runs"}: ${runs.join(", ") || "none"}`;
+      return new Text(
+        `${theme.fg("muted", kindLine)}\n${theme.fg("muted", runLine)}`,
+        0,
+        0,
+      );
     },
   });
 
@@ -221,6 +252,19 @@ export default function piSubagents(pi: ExtensionAPI): void {
         content: [{ type: "text", text: answer }],
         details: { runs: runtime?.list() ?? [] },
       };
+    },
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const fallback = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      return new Text(
+        theme.fg(
+          details?.error ? "error" : "muted",
+          details?.error ? fallback : "answer received",
+        ),
+        0,
+        0,
+      );
     },
   });
 }

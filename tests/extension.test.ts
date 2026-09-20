@@ -16,6 +16,18 @@ interface TestContext {
   };
 }
 
+interface TestToolResult {
+  content: Array<{ type: string; text: string }>;
+  details?: unknown;
+  isError?: boolean;
+  terminate?: boolean;
+}
+
+interface TestTheme {
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+}
+
 interface RegisteredTool {
   name: string;
   execute(
@@ -24,8 +36,18 @@ interface RegisteredTool {
     signal: AbortSignal,
     onUpdate: undefined,
     context: TestContext,
-  ): Promise<unknown>;
+  ): Promise<TestToolResult>;
+  renderResult?(
+    result: TestToolResult,
+    options: { isPartial: boolean },
+    theme: TestTheme,
+  ): { render(width: number): string[] };
 }
+
+const theme: TestTheme = {
+  fg: (_color, text) => text,
+  bold: (text) => text,
+};
 
 async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -108,22 +130,47 @@ process.stdin.once("data", (chunk) => {
     await handlers.get("session_start")?.({}, context);
     const tool = tools.get("subagent");
     assert.ok(tool);
-    const slow = (await tool.execute(
+    const slow = await tool.execute(
       "slow-call",
       { id: "slow", name: "scout", prompt: "Slow" },
       new AbortController().signal,
       undefined,
       context,
-    )) as { terminate?: boolean };
-    const fast = (await tool.execute(
+    );
+    const fast = await tool.execute(
       "fast-call",
       { id: "fast", name: "scout", prompt: "Fast" },
       new AbortController().signal,
       undefined,
       context,
-    )) as { terminate?: boolean };
+    );
     assert.equal(slow.terminate, true);
     assert.equal(fast.terminate, true);
+    assert.deepEqual(
+      tool
+        .renderResult?.(slow, { isPartial: false }, theme)
+        .render(120)
+        .map((line) => line.trimEnd()),
+      ["started slow (scout)"],
+    );
+    const listTool = tools.get("subagent_list");
+    assert.ok(listTool);
+    const listed = await listTool.execute(
+      "list-call",
+      {},
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    const listLines = listTool
+      .renderResult?.(listed, { isPartial: false }, theme)
+      .render(120)
+      .map((line) => line.trimEnd());
+    assert.deepEqual(listLines, [
+      "1 kind: scout",
+      "2 runs: slow (scout) [running], fast (scout) [running]",
+    ]);
+    assert.ok(listLines?.every((line) => !line.includes("{")));
     assert.ok(widgets.some((value) => typeof value === "function"));
     await new Promise((resolve) => setTimeout(resolve, 35));
     assert.equal(messages.length, 0);
@@ -133,6 +180,7 @@ process.stdin.once("data", (chunk) => {
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
   } finally {
+    await handlers.get("session_shutdown")?.({}, context);
     process.env.PATH = previousPath;
     await rm(directory, { recursive: true, force: true });
   }
