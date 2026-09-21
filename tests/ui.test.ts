@@ -83,18 +83,22 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
       agent: "scout",
       startedAt: 2000,
       endedAt: 4000,
+      events: [message("scout note")],
     }),
   ];
   const lines = renderAgentTree(runs, 120, theme, 61000);
+  assert.equal(lines.length, 4);
   assert.match(lines[0] ?? "", /total: 3  completed: 2/);
-  assert.match(lines[1] ?? "", /worker:worker claude\/opus think:high 01:00/);
-  assert.match(lines[2] ?? "", /ctx 1.6k \| in 1.0k.*\$0.12/);
-  const scout = lines.findIndex((line) => line.includes("scout"));
-  const review = lines.findIndex((line) => line.includes("review"));
-  assert.ok(scout > 0);
-  assert.ok(review > scout);
-  assert.match(lines[scout] ?? "", /\+-- \[ok\] scout:earlier/);
-  assert.match(lines[review] ?? "", /`-- \[ok\] review:later/);
+  assert.match(
+    lines[1] ?? "",
+    /worker:worker claude\/opus think:high 01:00 ctx 1.6k \| in 1.0k.*\$0.12/,
+  );
+  assert.match(
+    lines[2] ?? "",
+    /\+-- \[ok\] scout:earlier .*ctx 1.6k \| in 1.0k.*\$0.12/,
+  );
+  assert.match(lines[3] ?? "", /`-- \[ok\] review:later/);
+  assert.ok(lines.every((line) => !line.includes("scout note")));
 });
 
 test("Active agent tree retains cumulative session totals", () => {
@@ -136,7 +140,7 @@ test("Agent tree keeps three recent one-line activities", () => {
     message("fourth output"),
   ];
   const lines = renderAgentTree(
-    [run({ id: "worker", agent: "worker", events })],
+    [run({ id: "worker", agent: "worker", status: "running", events })],
     54,
     theme,
     5000,

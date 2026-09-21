@@ -239,11 +239,11 @@ export function renderAgentTree(
   ) => {
     const elapsed = formatDuration(run.startedAt, run.endedAt ?? now);
     lines.push(
-      `${prefix}${connector}${status(run, theme)} ${theme.accent(theme.bold(`${run.agent}:${run.id}`))} ${theme.muted(`${run.harness}/${run.model}`)} ${theme.dim(`think:${run.thinking} ${elapsed}`)}`,
+      `${prefix}${connector}${status(run, theme)} ${theme.accent(theme.bold(`${run.agent}:${run.id}`))} ${theme.muted(`${run.harness}/${run.model}`)} ${theme.dim(`think:${run.thinking} ${elapsed}`)} ${theme.dim(formatUsage(run.usage))}`,
     );
     const continuation = connector ? `${prefix}${last ? "    " : "|   "}` : "";
-    lines.push(`${continuation}|  ${theme.dim(formatUsage(run.usage))}`);
-    const recent = activities(run);
+    const active = run.status === "running" || run.status === "waiting";
+    const recent = active ? activities(run) : [];
     const omitted = Math.max(0, recent.length - 3);
     if (omitted > 0)
       lines.push(
