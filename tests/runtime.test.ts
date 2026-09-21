@@ -132,7 +132,7 @@ process.stdin.on("data", async (chunk) => {
     );
     assert.deepEqual(
       workerResult.inventory.runs.map((run) => run.id),
-      ["code"],
+      [],
     );
     assert.match(rootMessages[0] ?? "", /Subagent implementation finished/);
     const inventory = await runtime.inventory();
@@ -142,11 +142,7 @@ process.stdin.on("data", async (chunk) => {
     );
     assert.deepEqual(
       inventory.runs.map((run) => run.id),
-      ["implementation"],
-    );
-    assert.equal(
-      inventory.runs[0]?.finalText,
-      completedWorker?.result?.finalText,
+      [],
     );
   } finally {
     await runtime.close();
@@ -234,6 +230,11 @@ process.stdin.once("data", async () => {
       /Duplicate directly owned subagent id/,
     );
     await until(() => runtime.list()[0]?.status === "waiting");
+    const waiting = await runtime.inventory();
+    assert.deepEqual(
+      waiting.runs.map((run) => ({ id: run.id, status: run.status })),
+      [{ id: "implementation", status: "waiting" }],
+    );
     assert.deepEqual(rootQuestions, [
       { id: "implementation", prompt: "Which API?" },
     ]);

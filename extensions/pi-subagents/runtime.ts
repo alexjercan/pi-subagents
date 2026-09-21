@@ -194,7 +194,11 @@ export async function createAgentRuntime(
   const inventory = async (ownerRunId?: string): Promise<AgentInventory> => ({
     kinds: (await allowedProfiles(ownerRunId)).map(kind),
     runs: [...snapshots.values()]
-      .filter((snapshot) => snapshot.parentRunId === ownerRunId)
+      .filter(
+        (snapshot) =>
+          snapshot.parentRunId === ownerRunId &&
+          (snapshot.status === "running" || snapshot.status === "waiting"),
+      )
       .map(ownedRun),
   });
   const waitForChild = async (
