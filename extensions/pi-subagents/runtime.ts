@@ -95,7 +95,7 @@ export interface AgentRuntime {
 export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
   onRootMessage?: (message: string) => void | Promise<void>;
-  onRootQuestion?: (id: string, prompt: string) => Promise<string | undefined>;
+  onRootQuestion?: (id: string, prompt: string) => void | Promise<void>;
 }
 
 interface PendingQuestion {
@@ -277,19 +277,12 @@ export async function createAgentRuntime(
       if (!onRootQuestion) {
         rejectPending(new Error("Root question handler is not available"));
       } else {
-        void onRootQuestion(snapshot.id, prompt)
-          .then(async (value) => {
-            if (value === undefined) {
-              rejectPending(new Error("Question was cancelled"));
-              return;
-            }
-            await message(undefined, snapshot.id, value);
-          })
-          .catch((error) =>
+        void (async () => onRootQuestion(snapshot.id, prompt))().catch(
+          (error: unknown) =>
             rejectPending(
               error instanceof Error ? error : new Error(String(error)),
             ),
-          );
+        );
       }
     }
     try {

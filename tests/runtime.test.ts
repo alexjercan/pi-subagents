@@ -151,7 +151,7 @@ process.stdin.on("data", async (chunk) => {
   }
 });
 
-test("A root subagent question is answered directly by the user", async () => {
+test("A top-level question notifies the owner and waits for its message", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-ask-"));
   const agentDir = join(root, "agent");
   const cwd = join(root, "project");
@@ -202,17 +202,12 @@ process.stdin.once("data", async () => {
   const previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${previousPath ?? ""}`;
   const rootQuestions: Array<{ id: string; prompt: string }> = [];
-  let answerQuestion: (answer: string) => void = () => undefined;
-  const answer = new Promise<string>((resolve) => {
-    answerQuestion = resolve;
-  });
   const runtime = await createAgentRuntime({
     cwd,
     agentDir,
     projectTrusted: false,
-    onRootQuestion: async (id, prompt) => {
+    onRootQuestion: (id, prompt) => {
       rootQuestions.push({ id, prompt });
-      return answer;
     },
   });
   try {
@@ -231,16 +226,309 @@ process.stdin.once("data", async () => {
     );
     await until(() => runtime.list()[0]?.status === "waiting");
     const waiting = await runtime.inventory();
-    assert.deepEqual(
-      waiting.runs.map((run) => ({ id: run.id, status: run.status })),
-      [{ id: "implementation", status: "waiting" }],
-    );
+    assert.deepEqual(waiting.runs, [
+      {
+        id: "implementation",
+        name: "worker",
+        status: "waiting",
+        question: "Which API?",
+      },
+    ]);
     assert.deepEqual(rootQuestions, [
       { id: "implementation", prompt: "Which API?" },
     ]);
-    answerQuestion("Use the stable API");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(runtime.list()[0]?.status, "waiting");
+    await runtime.message(undefined, "implementation", "Use the stable API");
     await until(() => runtime.list()[0]?.status === "completed");
     assert.equal(runtime.list()[0]?.result?.finalText, "Use the stable API");
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A nested question wakes the direct parent and resumes on its answer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-nested-ask-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Ask when blocked.
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    delegates: [scout]
+    system: Answer your children.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+process.stdin.once("data", async () => {
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  if (model === "haiku") {
+    const answer = await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which file?" } });
+    await client.close();
+    process.stdout.write(JSON.stringify({ type: "result", result: "scout read " + answer.content[0].text, usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");
+    return;
+  }
+  const asked = await client.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Inspect" } });
+  const resumed = await client.callTool({ name: "subagent_message", arguments: { id: "code", message: "runtime.ts" } });
+  await client.close();
+  process.stdout.write(JSON.stringify({ type: "result", result: JSON.stringify({ asked: JSON.parse(asked.content[0].text), resumed: JSON.parse(resumed.content[0].text) }), usage: { input_tokens: 2, output_tokens: 2 } }) + "\\n");
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const rootQuestions: Array<{ id: string; prompt: string }> = [];
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootQuestion: (id, prompt) => {
+      rootQuestions.push({ id, prompt });
+    },
+  });
+  try {
+    const worker = await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await until(
+      () =>
+        runtime.list().find((run) => run.runId === worker.runId)?.status ===
+        "completed",
+    );
+    const workerResult = JSON.parse(
+      runtime.list().find((run) => run.runId === worker.runId)?.result
+        ?.finalText ?? "{}",
+    ) as { asked: unknown; resumed: unknown };
+    assert.deepEqual(workerResult.asked, {
+      id: "code",
+      name: "scout",
+      status: "waiting",
+      question: "Which file?",
+    });
+    assert.deepEqual(workerResult.resumed, {
+      id: "code",
+      name: "scout",
+      status: "completed",
+      finalText: "scout read runtime.ts",
+    });
+    assert.deepEqual(rootQuestions, []);
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A question pending when its subagent exits rejects a late answer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-abandon-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  const abandon = join(root, "abandon");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    system: Ask when blocked.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.stdin.once("data", async () => {
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const { existsSync } = await import("node:fs");
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  client.callTool({ name: "subagent_ask", arguments: { prompt: "Which API?" } }).catch(() => {});
+  while (!existsSync(${JSON.stringify(abandon)})) await new Promise((resolve) => setTimeout(resolve, 5));
+  process.stdout.write(JSON.stringify({ type: "result", result: "abandoned the question", usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n", () => process.exit(0));
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const rootQuestions: Array<{ id: string; prompt: string }> = [];
+  const rootMessages: string[] = [];
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootQuestion: async (id, prompt) => {
+      rootQuestions.push({ id, prompt });
+      await writeFile(abandon, "");
+    },
+    onRootMessage: (message) => {
+      rootMessages.push(message);
+    },
+  });
+  try {
+    await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await until(() => runtime.list()[0]?.status === "completed");
+    assert.deepEqual(rootQuestions, [
+      { id: "implementation", prompt: "Which API?" },
+    ]);
+    assert.equal(
+      runtime.list()[0]?.result?.finalText,
+      "abandoned the question",
+    );
+    assert.match(
+      rootMessages[0] ?? "",
+      /Subagent implementation finished with status completed/,
+    );
+    await assert.rejects(
+      runtime.message(undefined, "implementation", "Use the stable API"),
+      /Subagent implementation is not running/,
+    );
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A failing root question handler rejects the pending question", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-handler-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    system: Ask when blocked.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.stdin.once("data", async () => {
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  const response = await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which API?" } });
+  await client.close();
+  process.stdout.write(JSON.stringify({ type: "result", result: response.content[0].text, usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const statuses: string[] = [];
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onUpdate: (runs) => {
+      const status = runs[0]?.status;
+      if (status && statuses.at(-1) !== status) statuses.push(status);
+    },
+    onRootQuestion: () => {
+      throw new Error("Owner could not be notified");
+    },
+  });
+  try {
+    await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await until(() => runtime.list()[0]?.status === "completed");
+    assert.equal(
+      runtime.list()[0]?.result?.finalText,
+      "Owner could not be notified",
+    );
+    assert.equal(runtime.list()[0]?.question, undefined);
+    assert.match(statuses.join(","), /waiting,running/);
   } finally {
     await runtime.close();
     process.env.PATH = previousPath;

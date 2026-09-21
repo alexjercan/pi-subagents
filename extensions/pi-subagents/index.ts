@@ -54,10 +54,13 @@ export default function piSubagents(pi: ExtensionAPI): void {
   let widgetRuns: AgentRunSnapshot[] = [];
   let widgetTimer: NodeJS.Timeout | undefined;
   let clearWidget = () => undefined;
-  let questionQueue = Promise.resolve();
-  let askUser:
-    | ((title: string, placeholder: string) => Promise<string | undefined>)
-    | undefined;
+
+  const wakeOwner = (content: string) => {
+    pi.sendMessage(
+      { customType: "pi-subagents", content, display: true },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+  };
 
   pi.on("session_start", async (_event, ctx) => {
     const refreshWidget = () => {
@@ -92,36 +95,17 @@ export default function piSubagents(pi: ExtensionAPI): void {
       widgetRuns = [];
       if (ctx.mode === "tui") ctx.ui.setWidget("pi-subagents", undefined);
     };
-    questionQueue = Promise.resolve();
-    askUser = (title, placeholder) => {
-      const question = questionQueue.then(() =>
-        ctx.ui.input(title, placeholder),
-      );
-      questionQueue = question.then(
-        () => undefined,
-        () => undefined,
-      );
-      return question;
-    };
     runtime = await createAgentRuntime({
       cwd: ctx.cwd,
       projectTrusted: ctx.isProjectTrusted(),
       onUpdate: setWidget,
       onRootQuestion(id, prompt) {
-        return (
-          askUser?.(`${id} asks: ${prompt}`, "Type your answer") ??
-          Promise.reject(new Error("Question UI is not available"))
+        wakeOwner(
+          `Subagent ${id} is waiting for an answer.\nQuestion: ${prompt}\nAnswer it with subagent_message using id ${id}.`,
         );
       },
       onRootMessage(message) {
-        pi.sendMessage(
-          {
-            customType: "pi-subagents",
-            content: message,
-            display: true,
-          },
-          { triggerTurn: true, deliverAs: "steer" },
-        );
+        wakeOwner(message);
       },
     });
   });
@@ -129,8 +113,6 @@ export default function piSubagents(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     const current = runtime;
     runtime = undefined;
-    askUser = undefined;
-    questionQueue = Promise.resolve();
     clearWidget();
     clearWidget = () => undefined;
     await current?.close();
@@ -256,43 +238,6 @@ export default function piSubagents(pi: ExtensionAPI): void {
       const runLine = `${runs.length} ${runs.length === 1 ? "run" : "runs"}: ${runs.join(", ") || "none"}`;
       return new Text(
         `${theme.fg("muted", kindLine)}\n${theme.fg("muted", runLine)}`,
-        0,
-        0,
-      );
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_ask",
-    label: "Subagent Ask",
-    description: "Ask the owning user a question and wait for the answer.",
-    parameters: Type.Object({
-      prompt: Type.String({
-        minLength: 1,
-        description: "Question for the user",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      if (!askUser) return errorResult("Subagent runtime is not running");
-      const answer = await askUser(
-        `Subagent asks: ${params.prompt}`,
-        "Type your answer",
-      );
-      if (answer === undefined) return errorResult("Question was cancelled");
-      return {
-        content: [{ type: "text", text: answer }],
-        details: { runs: runtime?.list() ?? [] },
-      };
-    },
-    renderResult(result, _options, theme) {
-      const content = result.content[0];
-      const fallback = content?.type === "text" ? content.text : "(no output)";
-      const details = result.details as SubagentDetails | undefined;
-      return new Text(
-        theme.fg(
-          details?.error ? "error" : "muted",
-          details?.error ? fallback : "answer received",
-        ),
         0,
         0,
       );

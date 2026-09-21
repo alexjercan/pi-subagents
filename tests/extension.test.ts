@@ -160,26 +160,10 @@ process.stdin.once("data", (chunk) => {
     piSubagents(pi);
     assert.deepEqual([...tools.keys()].sort(), [
       "subagent",
-      "subagent_ask",
       "subagent_list",
       "subagent_message",
     ]);
     await handlers.get("session_start")?.({}, context);
-    const askTool = tools.get("subagent_ask");
-    assert.ok(askTool);
-    await askTool.execute(
-      "ask-call",
-      { prompt: "Which topic?" },
-      new AbortController().signal,
-      undefined,
-      context,
-    );
-    assert.deepEqual(inputs, [
-      {
-        title: "Subagent asks: Which topic?",
-        placeholder: "Type your answer",
-      },
-    ]);
     const tool = tools.get("subagent");
     assert.ok(tool);
     const slow = await tool.execute(
@@ -240,6 +224,7 @@ process.stdin.once("data", (chunk) => {
     await until(() => widgets.at(-1) === undefined && messages.length === 1);
     assert.match(JSON.stringify(messages[0]), /Subagent fast finished/);
     assert.match(JSON.stringify(messages[0]), /Subagent slow finished/);
+    assert.deepEqual(inputs, []);
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
   } finally {
