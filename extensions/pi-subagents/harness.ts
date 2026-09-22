@@ -12,10 +12,16 @@ export type PiThinkingLevel =
   | "xhigh"
   | "max";
 export type ClaudeThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type ClaudePermissionMode = "auto" | "bypassPermissions";
 
 export type HarnessConfig =
   | { harness: "pi"; model: string; thinking: PiThinkingLevel }
-  | { harness: "claude"; model: string; thinking: ClaudeThinkingLevel };
+  | {
+      harness: "claude";
+      model: string;
+      thinking: ClaudeThinkingLevel;
+      permissionMode: ClaudePermissionMode;
+    };
 
 export interface HarnessRequest {
   cwd: string;

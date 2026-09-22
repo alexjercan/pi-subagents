@@ -23,6 +23,9 @@ profiles with the same name.
 
 `examples/subagents.yaml` demonstrates `scout`, `pi-scout`, `research`,
 `worker`, and `review`. Copy and adapt it for a project or user configuration.
+Claude agents accept an optional `permissionMode` of `auto` or
+`bypassPermissions`. It defaults to `bypassPermissions` when omitted. Use `auto`
+for agents that must ask before acting. Pi agents reject the field.
 Pi and Claude children use the same authenticated delegation protocol. Each
 child can list and message only its configured delegate kinds and directly
 owned runs. The original session retains all runs and their parent-child

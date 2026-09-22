@@ -115,7 +115,12 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   const events: HarnessEvent[] = [];
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "inspect" },
-    { harness: "claude", model: "sonnet", thinking: "high" },
+    {
+      harness: "claude",
+      model: "sonnet",
+      thinking: "high",
+      permissionMode: "bypassPermissions",
+    },
     {
       system: "Implement carefully.",
       tools: ["read", "ls", "find", "web_search"],
@@ -235,11 +240,37 @@ test("A running harness accepts a steering message", async () => {
 test("Stopping a harness terminates its process", async () => {
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "wait" },
-    { harness: "claude", model: "sonnet", thinking: "medium" },
+    {
+      harness: "claude",
+      model: "sonnet",
+      thinking: "medium",
+      permissionMode: "bypassPermissions",
+    },
     { system: "Wait." },
     () => undefined,
   );
   run.stop();
   const result = await run.completion;
   assert.equal(result.signal, "SIGTERM");
+});
+
+test("Claude forwards the configured permission mode", async () => {
+  const run = spawnHarness(
+    { cwd: process.cwd(), prompt: "inspect" },
+    {
+      harness: "claude",
+      model: "sonnet",
+      thinking: "high",
+      permissionMode: "auto",
+    },
+    { system: "Inspect." },
+    () => undefined,
+  );
+  const result = await run.completion;
+  const invocation = JSON.parse(result.stderr) as { args: string[] };
+  const index = invocation.args.indexOf("--permission-mode");
+  assert.deepEqual(invocation.args.slice(index, index + 2), [
+    "--permission-mode",
+    "auto",
+  ]);
 });

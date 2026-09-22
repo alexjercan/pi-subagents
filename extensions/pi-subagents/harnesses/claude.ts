@@ -68,7 +68,7 @@ export function createClaudeAdapter(
     "--effort",
     config.thinking,
     "--permission-mode",
-    "bypassPermissions",
+    config.permissionMode,
     "--output-format",
     "stream-json",
     "--input-format",

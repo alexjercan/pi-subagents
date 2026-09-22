@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parseDocument } from "yaml";
 import type {
+  ClaudePermissionMode,
   ClaudeThinkingLevel,
   HarnessConfig,
   PiThinkingLevel,
@@ -24,12 +25,17 @@ const claudeThinkingLevels = new Set<ClaudeThinkingLevel>([
   "xhigh",
   "max",
 ]);
+const claudePermissionModes = new Set<ClaudePermissionMode>([
+  "auto",
+  "bypassPermissions",
+]);
 const rootKeys = new Set(["agents"]);
 const agentKeys = new Set([
   "description",
   "harness",
   "model",
   "thinking",
+  "permissionMode",
   "tools",
   "delegates",
   "system",
@@ -128,6 +134,22 @@ function delegates(value: unknown, location: string): string[] {
   return [...value] as string[];
 }
 
+function permissionMode(
+  value: unknown,
+  location: string,
+): ClaudePermissionMode {
+  if (value === undefined) return "bypassPermissions";
+  if (
+    typeof value !== "string" ||
+    !claudePermissionModes.has(value as ClaudePermissionMode)
+  ) {
+    throw new Error(
+      `${location}.permissionMode must be auto or bypassPermissions`,
+    );
+  }
+  return value as ClaudePermissionMode;
+}
+
 function harnessConfig(
   value: Record<string, unknown>,
   location: string,
@@ -135,18 +157,23 @@ function harnessConfig(
   const harness = requiredString(value, "harness", location);
   const model = requiredString(value, "model", location);
   const thinking = requiredString(value, "thinking", location);
-  if (harness === "pi" && piThinkingLevels.has(thinking as PiThinkingLevel)) {
-    return { harness, model, thinking: thinking as PiThinkingLevel };
-  }
-  if (
-    harness === "claude" &&
-    claudeThinkingLevels.has(thinking as ClaudeThinkingLevel)
-  ) {
-    return { harness, model, thinking: thinking as ClaudeThinkingLevel };
-  }
   if (harness !== "pi" && harness !== "claude")
     throw new Error(`${location}.harness must be pi or claude`);
-  throw new Error(`${location}.thinking is not supported by ${harness}`);
+  if (harness === "pi") {
+    if (value.permissionMode !== undefined)
+      throw new Error(`${location}.permissionMode requires the claude harness`);
+    if (!piThinkingLevels.has(thinking as PiThinkingLevel))
+      throw new Error(`${location}.thinking is not supported by ${harness}`);
+    return { harness, model, thinking: thinking as PiThinkingLevel };
+  }
+  if (!claudeThinkingLevels.has(thinking as ClaudeThinkingLevel))
+    throw new Error(`${location}.thinking is not supported by ${harness}`);
+  return {
+    harness,
+    model,
+    thinking: thinking as ClaudeThinkingLevel,
+    permissionMode: permissionMode(value.permissionMode, location),
+  };
 }
 
 async function yaml(path: string): Promise<unknown | undefined> {
