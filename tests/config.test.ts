@@ -58,6 +58,7 @@ test("Trusted project agents override user agents by name", async () => {
     harness: claude
     model: opus
     thinking: xhigh
+    permissionMode: auto
     system: Review the requested change.
 `,
   );
@@ -79,12 +80,23 @@ test("Trusted project agents override user agents by name", async () => {
     assert.deepEqual(loaded[1], {
       name: "shared",
       description: "Project definition.",
-      config: { harness: "claude", model: "sonnet", thinking: "high" },
+      config: {
+        harness: "claude",
+        model: "sonnet",
+        thinking: "high",
+        permissionMode: "bypassPermissions",
+      },
       system: "Project prompt.",
       tools: [],
       delegates: ["reviewer"],
       source: "project",
       path: join(files.cwd, ".pi", "subagents.yaml"),
+    });
+    assert.deepEqual(loaded[2]?.config, {
+      harness: "claude",
+      model: "opus",
+      thinking: "xhigh",
+      permissionMode: "auto",
     });
     assert.equal(loaded[2]?.source, "project");
     assert.deepEqual(loaded[0]?.delegates, []);
@@ -224,6 +236,30 @@ test("Invalid agent configuration fails the complete source file", async () => {
     system: Inspect.
 `,
       error: /thinking is not supported by claude/,
+    },
+    {
+      source: `agents:
+  scout:
+    description: Read the project.
+    harness: claude
+    model: sonnet
+    thinking: high
+    permissionMode: acceptEdits
+    system: Inspect.
+`,
+      error: /permissionMode must be auto or bypassPermissions/,
+    },
+    {
+      source: `agents:
+  scout:
+    description: Read the project.
+    harness: pi
+    model: openai/gpt-test
+    thinking: medium
+    permissionMode: auto
+    system: Inspect.
+`,
+      error: /permissionMode requires the claude harness/,
     },
     {
       source: `agents:

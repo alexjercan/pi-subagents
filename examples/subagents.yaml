@@ -4,6 +4,7 @@ agents:
     harness: claude
     model: haiku
     thinking: medium
+    permissionMode: auto
     tools:
       - read
       - ls
