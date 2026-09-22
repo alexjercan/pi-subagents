@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import crossSpawn from "cross-spawn";
 import { StringDecoder } from "node:string_decoder";
 
 interface ProcessSpec {
@@ -26,7 +26,7 @@ export function spawnJsonlProcess(
   spec: ProcessSpec,
   onRecord: (value: unknown) => void,
 ): ProcessRun {
-  const child = spawn(spec.command, spec.args, {
+  const child = crossSpawn.spawn(spec.command, spec.args, {
     cwd: spec.cwd,
     env: spec.env,
     shell: false,
