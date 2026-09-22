@@ -142,7 +142,6 @@ export async function createAgentRuntime(
   const authorizations = new Map<string, string>();
   const questions = new Map<string, PendingQuestion>();
   const stateWaiters = new Map<string, Set<() => void>>();
-  const rootCompletions: string[] = [];
   let closing = false;
   let host: DelegationHost;
 
@@ -330,22 +329,13 @@ export async function createAgentRuntime(
     if (!closing && !snapshot.parentRunId) {
       const output =
         snapshot.result?.finalText || snapshot.error || "(no output)";
-      rootCompletions.push(
-        `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
-      );
-      const rootsRunning = [...snapshots.values()].some(
-        (candidate) =>
-          !candidate.parentRunId &&
-          (candidate.status === "running" || candidate.status === "waiting"),
-      );
-      if (!rootsRunning) {
-        const message = rootCompletions.splice(0).join("\n\n");
-        try {
-          await options.onRootMessage?.(message);
-        } catch (error) {
-          snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
-          emit();
-        }
+      try {
+        await options.onRootMessage?.(
+          `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+        );
+      } catch (error) {
+        snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
+        emit();
       }
     }
   };

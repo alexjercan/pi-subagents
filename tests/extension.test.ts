@@ -81,7 +81,7 @@ test("Delegated Pi children leave subagent tools to the bridge", () => {
   assert.equal(tools, 0);
 });
 
-test("Root delegation terminates its turn and wakes after the active cohort", async () => {
+test("Root delegation terminates its turn and wakes on each child completion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
   const project = join(directory, "project");
   await mkdir(join(project, ".pi"), { recursive: true });
@@ -104,7 +104,7 @@ test("Root delegation terminates its turn and wakes after the active cohort", as
 process.stdin.once("data", (chunk) => {
   const command = JSON.parse(String(chunk).split("\\n")[0]);
   const prompt = command.message?.content ?? "";
-  const delay = prompt === "Slow" ? 60 : 20;
+  const delay = prompt === "Slow" ? 300 : 20;
   process.stdout.write(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Inspecting" }], usage: { input_tokens: 4, output_tokens: 1 } } }) + "\\n");
   setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: prompt + " done", usage: { input_tokens: 4, output_tokens: 2 }, total_cost_usd: 0.01 }) + "\\n"), delay);
 });
@@ -119,7 +119,10 @@ process.stdin.once("data", (chunk) => {
     (event: unknown, context: TestContext) => unknown
   >();
   const tools = new Map<string, RegisteredTool>();
-  const messages: unknown[] = [];
+  const messages: Array<{
+    message: Record<string, unknown>;
+    options: unknown;
+  }> = [];
   const pi = {
     on(
       event: string,
@@ -130,8 +133,8 @@ process.stdin.once("data", (chunk) => {
     registerTool(value: RegisteredTool) {
       tools.set(value.name, value);
     },
-    sendMessage(message: unknown) {
-      messages.push(message);
+    sendMessage(message: Record<string, unknown>, options: unknown) {
+      messages.push({ message, options });
     },
   } as unknown as ExtensionAPI;
   const widgets: unknown[] = [];
@@ -208,22 +211,44 @@ process.stdin.once("data", (chunk) => {
     ]);
     assert.ok(listLines?.every((line) => !line.includes("{")));
     assert.ok(widgets.some((value) => typeof value === "function"));
-    await new Promise((resolve) => setTimeout(resolve, 35));
-    assert.equal(messages.length, 0);
-    await until(
-      () =>
-        widgetRenders.some((lines) =>
-          /total: 2  completed: 1/.test(lines[0] ?? ""),
-        ) || widgets.at(-1) === undefined,
+    await until(() => messages.length === 1);
+    assert.deepEqual(messages[0], {
+      message: {
+        customType: "pi-subagents",
+        content: "Subagent fast finished with status completed.\nFast done",
+        display: true,
+      },
+      options: { triggerTurn: true, deliverAs: "steer" },
+    });
+    const pending = await listTool.execute(
+      "pending-call",
+      {},
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    assert.deepEqual(
+      listTool
+        .renderResult?.(pending, { isPartial: false }, theme)
+        .render(120)
+        .map((line) => line.trimEnd()),
+      ["1 kind: scout", "1 run: slow (scout) [running]"],
     );
     assert.ok(
       widgetRenders.some((lines) =>
         /total: 2  completed: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
       ),
     );
-    await until(() => widgets.at(-1) === undefined && messages.length === 1);
-    assert.match(JSON.stringify(messages[0]), /Subagent fast finished/);
-    assert.match(JSON.stringify(messages[0]), /Subagent slow finished/);
+    await until(() => messages.length === 2);
+    assert.deepEqual(messages[1], {
+      message: {
+        customType: "pi-subagents",
+        content: "Subagent slow finished with status completed.\nSlow done",
+        display: true,
+      },
+      options: { triggerTurn: true, deliverAs: "steer" },
+    });
+    await until(() => widgets.at(-1) === undefined);
     assert.deepEqual(inputs, []);
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
