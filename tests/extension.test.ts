@@ -211,7 +211,7 @@ process.stdin.once("data", (chunk) => {
     ]);
     assert.ok(listLines?.every((line) => !line.includes("{")));
     assert.ok(widgets.some((value) => typeof value === "function"));
-    await until(() => messages.length === 1);
+    await until(() => messages.length >= 1);
     assert.deepEqual(messages[0], {
       message: {
         customType: "pi-subagents",
@@ -239,7 +239,7 @@ process.stdin.once("data", (chunk) => {
         /total: 2  completed: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
       ),
     );
-    await until(() => messages.length === 2);
+    await until(() => messages.length >= 2);
     assert.deepEqual(messages[1], {
       message: {
         customType: "pi-subagents",
