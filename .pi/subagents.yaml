@@ -19,7 +19,7 @@ agents:
   basic:
     description: Handle focused, routine repository tasks.
     harness: pi
-    model: gemma/gemma-4-26B-A4B-it
+    model: qwen/Qwen3.5-9B
     thinking: medium
     tools:
       - read
