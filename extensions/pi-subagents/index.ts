@@ -122,12 +122,12 @@ export default function piSubagents(pi: ExtensionAPI): void {
     name: "subagent",
     label: "Subagent",
     description:
-      "Start a configured direct child, end this turn, and wake when the active root cohort completes.",
+      "Start a configured direct child, end this turn, and wake when that child completes.",
     promptSnippet: "Start configured subagents and wait for their completion",
     promptGuidelines: [
       "Call subagent_list only to discover configured agent kinds before delegation.",
       "Use a distinct id for each directly owned subagent.",
-      "Do not poll or sleep after starting subagents; the turn ends and completed subagents wake you with their final output.",
+      "Do not poll or sleep after starting subagents; the turn ends and each subagent wakes you with its own final output when it completes.",
     ],
     parameters: Type.Object({
       id: Type.String({ minLength: 1, description: "Child identifier" }),
