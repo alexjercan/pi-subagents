@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-23
+
+### Changed
+
+- Wake the root orchestrator for each top-level subagent completion instead of waiting for all active root subagents.
+
 ## [0.1.4] - 2026-09-22
 
 ### Added
@@ -54,7 +60,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/alexjercan/pi-subagents/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/alexjercan/pi-subagents/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/alexjercan/pi-subagents/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/alexjercan/pi-subagents/compare/v0.1.1...v0.1.2
