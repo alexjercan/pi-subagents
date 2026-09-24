@@ -25,6 +25,7 @@ export interface DelegationOperations {
     prompt: string,
   ): Promise<unknown>;
   message(callerRunId: string, id: string, message: string): Promise<unknown>;
+  stop(callerRunId: string, id: string): Promise<unknown>;
   list(callerRunId: string): Promise<unknown>;
   ask(
     callerRunId: string,
@@ -154,6 +155,21 @@ export async function createDelegationHost(
       async ({ id, message }) => {
         try {
           return text(await operations.message(grant.callerRunId, id, message));
+        } catch (error) {
+          return failure(error);
+        }
+      },
+    );
+    server.registerTool(
+      "subagent_stop",
+      {
+        description:
+          "Stop a directly owned child and its subtree and wait for its final state.",
+        inputSchema: { id: z.string().min(1) },
+      },
+      async ({ id }) => {
+        try {
+          return text(await operations.stop(grant.callerRunId, id));
         } catch (error) {
           return failure(error);
         }

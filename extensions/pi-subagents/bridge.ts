@@ -79,6 +79,17 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "subagent_stop",
+    label: "Subagent Stop",
+    description:
+      "Stop a directly owned child and its subtree and wait for its final state.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Direct child identifier" }),
+    }),
+    execute: (_id, params, signal) => invoke("subagent_stop", params, signal),
+  });
+
+  pi.registerTool({
     name: "subagent_list",
     label: "Subagent List",
     description: "List allowed agent kinds and directly owned runs.",

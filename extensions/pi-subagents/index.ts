@@ -208,6 +208,40 @@ export default function piSubagents(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "subagent_stop",
+    label: "Subagent Stop",
+    description:
+      "Stop a directly owned subagent and its subtree, end this turn, and wake when it is cancelled.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1, description: "Direct child identifier" }),
+    }),
+    async execute(_toolCallId, params) {
+      if (!runtime) return errorResult("Subagent runtime is not running");
+      try {
+        const run = await runtime.stop(undefined, params.id);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Stopped subagent ${run.id} with status ${run.status}`,
+            },
+          ],
+          details: { runs: runtime.list() },
+          terminate: true,
+        };
+      } catch (error) {
+        return errorResult(error, runtime.list());
+      }
+    },
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const text = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      return new Text(theme.fg(details?.error ? "error" : "muted", text), 0, 0);
+    },
+  });
+
+  pi.registerTool({
     name: "subagent_list",
     label: "Subagent List",
     description: "List configured agent kinds and directly owned runs.",

@@ -74,6 +74,9 @@ function formatTool(name: string, value: unknown): string {
       `subagent_message ${string(input.id) ?? "child"} ${JSON.stringify(string(input.message) ?? "")}`,
     );
   }
+  if (normalized.endsWith("subagent_stop")) {
+    return `subagent_stop ${string(input.id) ?? "child"}`;
+  }
   if (normalized.endsWith("subagent_list")) return "subagent_list";
   if (normalized.endsWith("subagent_ask")) {
     return compact(

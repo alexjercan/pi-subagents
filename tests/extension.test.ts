@@ -165,6 +165,7 @@ process.stdin.once("data", (chunk) => {
       "subagent",
       "subagent_list",
       "subagent_message",
+      "subagent_stop",
     ]);
     await handlers.get("session_start")?.({}, context);
     const tool = tools.get("subagent");

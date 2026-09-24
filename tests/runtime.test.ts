@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -144,6 +152,411 @@ process.stdin.on("data", async (chunk) => {
       inventory.runs.map((run) => run.id),
       [],
     );
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Stopping a direct running child cancels it and wakes the root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    system: Work until stopped.
+`,
+  );
+  const claude = join(bin, "claude");
+  await writeFile(
+    claude,
+    `#!/usr/bin/env node
+process.stdin.resume();
+`,
+  );
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const rootMessages: string[] = [];
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootMessage: (message) => {
+      rootMessages.push(message);
+    },
+  });
+  try {
+    const worker = await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await assert.rejects(
+      runtime.stop(undefined, "missing"),
+      /^Error: Unknown directly owned subagent missing$/,
+    );
+    await assert.rejects(
+      runtime.stop(worker.runId, "implementation"),
+      /^Error: Unknown directly owned subagent implementation$/,
+    );
+    assert.deepEqual(await runtime.stop(undefined, "implementation"), {
+      id: "implementation",
+      name: "worker",
+      status: "cancelled",
+      error: "Agent was cancelled",
+    });
+    await until(() => rootMessages.length > 0);
+    assert.match(
+      rootMessages[0] ?? "",
+      /^Subagent implementation finished with status cancelled\./,
+    );
+    await assert.rejects(
+      runtime.stop(undefined, "implementation"),
+      /^Error: Subagent implementation is not running$/,
+    );
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Stopping a waiting direct child clears its question and cancels its running child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-tree-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect until stopped.
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    delegates: [scout]
+    system: Delegate and ask.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+process.stdin.once("data", async () => {
+  if (model === "haiku") return;
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  void client.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Inspect" } }).catch(() => undefined);
+  await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which API?" } });
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootQuestion: () => undefined,
+  });
+  try {
+    const worker = await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    const scout = () =>
+      runtime.list().find((run) => run.parentRunId === worker.runId);
+    await until(
+      () =>
+        runtime.list().find((run) => run.runId === worker.runId)?.status ===
+          "waiting" && scout()?.status === "running",
+    );
+    assert.deepEqual(await runtime.stop(undefined, "implementation"), {
+      id: "implementation",
+      name: "worker",
+      status: "cancelled",
+      error: "Agent was cancelled",
+    });
+    await until(() => scout()?.status === "cancelled");
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A stop fails when the child completes, and a stopping child accepts no new work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-race-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  const ready = join(root, "ready");
+  const attempts = join(root, "attempts");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect.
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    delegates: [scout]
+    system: Finish on stop.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.stdin.once("data", async () => {
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const { writeFileSync } = await import("node:fs");
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  process.on("SIGTERM", async () => {
+    const start = await client.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Inspect" } });
+    const ask = await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which API?" } });
+    writeFileSync(${JSON.stringify(attempts)}, JSON.stringify([start, ask]));
+    process.stdout.write(JSON.stringify({ type: "result", result: "finished on stop", usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n", () => process.exit(0));
+  });
+  writeFileSync(${JSON.stringify(ready)}, "");
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const rootMessages: string[] = [];
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootQuestion: () => undefined,
+    onRootMessage: (message) => {
+      rootMessages.push(message);
+    },
+  });
+  try {
+    await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await until(() => existsSync(ready));
+    const stopped = runtime.stop(undefined, "implementation");
+    await assert.rejects(
+      runtime.stop(undefined, "implementation"),
+      /^Error: Subagent implementation is not running$/,
+    );
+    await assert.rejects(
+      runtime.message(undefined, "implementation", "Continue"),
+      /^Error: Subagent implementation is not running$/,
+    );
+    await assert.rejects(
+      stopped,
+      /^Error: Subagent implementation completed before it was cancelled$/,
+    );
+    assert.deepEqual(JSON.parse(await readFile(attempts, "utf8")), [
+      {
+        content: [{ type: "text", text: "Agent is not running" }],
+        isError: true,
+      },
+      {
+        content: [{ type: "text", text: "Agent is not running" }],
+        isError: true,
+      },
+    ]);
+    assert.deepEqual(
+      runtime.list().map((run) => [run.id, run.status]),
+      [["implementation", "completed"]],
+    );
+    await until(() => rootMessages.length > 0);
+    assert.match(
+      rootMessages[0] ?? "",
+      /^Subagent implementation finished with status completed\.\nfinished on stop$/,
+    );
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("A stopped subtree accepts no work after the stop target is cancelled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-subtree-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  const ready = join(root, "ready");
+  const go = join(root, "go");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect.
+  lead:
+    description: Coordinate.
+    harness: claude
+    model: sonnet
+    thinking: medium
+    delegates: [scout]
+    system: Coordinate.
+  worker:
+    description: Implement.
+    harness: claude
+    model: opus
+    thinking: medium
+    delegates: [lead]
+    system: Implement.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  const fixture = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+process.stdin.once("data", async () => {
+  const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+  const server = config.mcpServers.pi_subagents;
+  const { Client } = await import(${JSON.stringify(clientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+  if (model === "opus") {
+    void client.callTool({ name: "subagent", arguments: { id: "coordination", name: "lead", prompt: "Coordinate" } }).catch(() => undefined);
+    return;
+  }
+  process.on("SIGTERM", async () => {
+    while (!existsSync(${JSON.stringify(go)})) await new Promise((resolve) => setTimeout(resolve, 5));
+    const result = model === "sonnet"
+      ? await client.callTool({ name: "subagent_message", arguments: { id: "code", message: "Continue" } })
+      : await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which API?" } });
+    writeFileSync(join(${JSON.stringify(root)}, model), JSON.stringify(result));
+    process.exit(0);
+  });
+  if (model === "sonnet") {
+    void client.callTool({ name: "subagent", arguments: { id: "code", name: "scout", prompt: "Inspect" } }).catch(() => undefined);
+    return;
+  }
+  writeFileSync(${JSON.stringify(ready)}, "");
+});
+`;
+  const claude = join(bin, "claude");
+  await writeFile(claude, fixture);
+  await chmod(claude, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+  });
+  try {
+    await runtime.start({
+      id: "implementation",
+      name: "worker",
+      prompt: "Implement",
+    });
+    await until(() => existsSync(ready));
+    assert.deepEqual(await runtime.stop(undefined, "implementation"), {
+      id: "implementation",
+      name: "worker",
+      status: "cancelled",
+      error: "Agent was cancelled",
+    });
+    await writeFile(go, "");
+    await until(
+      () => existsSync(join(root, "sonnet")) && existsSync(join(root, "haiku")),
+    );
+    assert.deepEqual(JSON.parse(await readFile(join(root, "sonnet"), "utf8")), {
+      content: [{ type: "text", text: "Subagent code is not running" }],
+      isError: true,
+    });
+    assert.deepEqual(JSON.parse(await readFile(join(root, "haiku"), "utf8")), {
+      content: [{ type: "text", text: "Agent is not running" }],
+      isError: true,
+    });
   } finally {
     await runtime.close();
     process.env.PATH = previousPath;

@@ -16,7 +16,12 @@ Call `subagent_list` to discover configured agent kinds. Start one with
 `prompt`. The root turn stops after starting children and wakes on each root
 child completion with that child's final output. Nested delegation calls wait
 without polling and return the child's final output. Root child questions open
-a user input directly.
+a user input directly. Stop a running or waiting direct child and its subtree
+with `subagent_stop` and its `id`. The call waits for the cancelled state and
+fails if the child completes or fails first. Unknown ids, ids owned by another
+agent, and finished or stopping children fail. A stopping subtree accepts no
+messages, questions, or new children. A root stop ends the turn and wakes on the
+normal cancelled completion.
 Nested questions return to the direct owner for an answer through
 `subagent_message`. Profiles load from `~/.pi/agent/subagents.yaml` and trusted
 project profiles load from `.pi/subagents.yaml`. Project profiles override user

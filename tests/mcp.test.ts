@@ -23,6 +23,7 @@ function operations(
   return {
     start: async () => ({ status: "running" }),
     message: async () => ({ status: "running" }),
+    stop: async () => ({ status: "cancelled" }),
     list: async () => ({ kinds: [], runs: [] }),
     ask: async () => "answer",
     ...overrides,
@@ -35,9 +36,10 @@ function content(result: Awaited<ReturnType<Client["callTool"]>>): string {
   );
 }
 
-test("MCP exposes the four subagent tools with direct-owner identity", async () => {
+test("MCP exposes the five subagent tools with direct-owner identity", async () => {
   const starts: unknown[] = [];
   const messages: unknown[] = [];
+  const stops: unknown[] = [];
   const host = await createDelegationHost(
     operations({
       start: async (...args) => {
@@ -47,6 +49,10 @@ test("MCP exposes the four subagent tools with direct-owner identity", async () 
       message: async (...args) => {
         messages.push(args);
         return { status: "running" };
+      },
+      stop: async (...args) => {
+        stops.push(args);
+        return { id: args[1], status: "cancelled" };
       },
       list: async (callerRunId) => ({
         kinds: [{ name: "scout" }],
@@ -62,6 +68,7 @@ test("MCP exposes the four subagent tools with direct-owner identity", async () 
       "subagent_ask",
       "subagent_list",
       "subagent_message",
+      "subagent_stop",
     ]);
     const started = await connected.callTool({
       name: "subagent",
@@ -74,6 +81,15 @@ test("MCP exposes the four subagent tools with direct-owner identity", async () 
       arguments: { id: "code", message: "Focus on config" },
     });
     assert.deepEqual(messages, [["worker-run", "code", "Focus on config"]]);
+    const stopped = await connected.callTool({
+      name: "subagent_stop",
+      arguments: { id: "code" },
+    });
+    assert.deepEqual(stops, [["worker-run", "code"]]);
+    assert.deepEqual(JSON.parse(content(stopped)), {
+      id: "code",
+      status: "cancelled",
+    });
     const listed = await connected.callTool({
       name: "subagent_list",
       arguments: {},

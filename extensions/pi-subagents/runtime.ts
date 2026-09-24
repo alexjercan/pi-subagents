@@ -86,6 +86,7 @@ export interface AgentRuntime {
     id: string,
     message: string,
   ): Promise<void>;
+  stop(ownerRunId: string | undefined, id: string): Promise<OwnedAgentRun>;
   inventory(ownerRunId?: string): Promise<AgentInventory>;
   list(): AgentRunSnapshot[];
   stopAll(): void;
@@ -142,6 +143,7 @@ export async function createAgentRuntime(
   const authorizations = new Map<string, string>();
   const questions = new Map<string, PendingQuestion>();
   const stateWaiters = new Map<string, Set<() => void>>();
+  const stopping = new Set<string>();
   let closing = false;
   let host: DelegationHost;
 
@@ -161,6 +163,12 @@ export async function createAgentRuntime(
     [...snapshots.values()].find(
       (snapshot) => snapshot.parentRunId === ownerRunId && snapshot.id === id,
     );
+  const markStopping = (runId: string) => {
+    if (active.has(runId)) stopping.add(runId);
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.parentRunId === runId) markStopping(snapshot.runId);
+    }
+  };
   const stopTree = (runId: string) => {
     for (const snapshot of snapshots.values()) {
       if (snapshot.parentRunId === runId) stopTree(snapshot.runId);
@@ -200,19 +208,38 @@ export async function createAgentRuntime(
       )
       .map(ownedRun),
   });
+  const nextState = (runId: string) =>
+    new Promise<void>((resolve) => {
+      const waiters = stateWaiters.get(runId) ?? new Set();
+      waiters.add(resolve);
+      stateWaiters.set(runId, waiters);
+    });
   const waitForChild = async (
     ownerRunId: string,
     id: string,
   ): Promise<OwnedAgentRun> => {
     const snapshot = child(ownerRunId, id);
     if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
-    while (snapshot.status === "running") {
-      await new Promise<void>((resolve) => {
-        const waiters = stateWaiters.get(snapshot.runId) ?? new Set();
-        waiters.add(resolve);
-        stateWaiters.set(snapshot.runId, waiters);
-      });
-    }
+    while (snapshot.status === "running") await nextState(snapshot.runId);
+    return ownedRun(snapshot);
+  };
+  const stop = async (
+    ownerRunId: string | undefined,
+    id: string,
+  ): Promise<OwnedAgentRun> => {
+    const snapshot = child(ownerRunId, id);
+    if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+    const live = () =>
+      snapshot.status === "running" || snapshot.status === "waiting";
+    if (!live() || stopping.has(snapshot.runId))
+      throw new Error(`Subagent ${id} is not running`);
+    markStopping(snapshot.runId);
+    stopTree(snapshot.runId);
+    while (live()) await nextState(snapshot.runId);
+    if (snapshot.status !== "cancelled")
+      throw new Error(
+        `Subagent ${id} ${snapshot.status} before it was cancelled`,
+      );
     return ownedRun(snapshot);
   };
 
@@ -223,6 +250,8 @@ export async function createAgentRuntime(
   ) => {
     const snapshot = child(ownerRunId, id);
     if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+    if (stopping.has(snapshot.runId))
+      throw new Error(`Subagent ${id} is not running`);
     const pending = questions.get(snapshot.runId);
     if (pending) {
       questions.delete(snapshot.runId);
@@ -244,7 +273,7 @@ export async function createAgentRuntime(
     signal: AbortSignal,
   ): Promise<string> => {
     const snapshot = snapshots.get(runId);
-    if (!snapshot || !active.has(runId))
+    if (!snapshot || !active.has(runId) || stopping.has(runId))
       throw new Error("Agent is not running");
     if (questions.has(runId))
       throw new Error(`Subagent ${snapshot.id} already has a pending question`);
@@ -311,12 +340,14 @@ export async function createAgentRuntime(
     } finally {
       snapshot.endedAt = Date.now();
       active.delete(snapshot.runId);
+      stopping.delete(snapshot.runId);
       questions
         .get(snapshot.runId)
         ?.reject(
           new Error(snapshot.error ?? "Agent completed before answering"),
         );
       questions.delete(snapshot.runId);
+      snapshot.question = undefined;
       for (const candidate of snapshots.values()) {
         if (candidate.parentRunId === snapshot.runId) stopTree(candidate.runId);
       }
@@ -351,6 +382,8 @@ export async function createAgentRuntime(
     if (child(request.parentRunId, request.id))
       throw new Error(`Duplicate directly owned subagent id ${request.id}`);
     const allowed = await allowedProfiles(request.parentRunId);
+    if (request.parentRunId && stopping.has(request.parentRunId))
+      throw new Error("Agent is not running");
     const profile = allowed.find(
       (candidate) => candidate.name === request.name,
     );
@@ -426,6 +459,7 @@ export async function createAgentRuntime(
       await message(callerRunId, id, value);
       return waitForChild(callerRunId, id);
     },
+    stop,
     list: (callerRunId) => inventory(callerRunId),
     ask,
   });
@@ -433,6 +467,7 @@ export async function createAgentRuntime(
   return {
     start,
     message,
+    stop,
     inventory,
     list,
     stopAll() {
