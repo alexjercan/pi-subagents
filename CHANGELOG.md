@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-24
+
+### Added
+
+- Add `subagent_stop` for direct owners to cancel a running or waiting subagent and its active descendants.
+
 ## [0.1.5] - 2026-09-23
 
 ### Changed
@@ -60,7 +66,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/alexjercan/pi-subagents/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/alexjercan/pi-subagents/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/alexjercan/pi-subagents/compare/v0.1.2...v0.1.3
