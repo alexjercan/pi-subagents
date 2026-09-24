@@ -20,7 +20,7 @@ agents:
   pi-scout:
     description: Gather focused codebase context using the Pi harness.
     harness: pi
-    model: openai-codex/gpt-5.6-luna
+    model: openai-codex/gpt-6-luna
     thinking: medium
     tools:
       - read
