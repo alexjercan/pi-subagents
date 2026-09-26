@@ -210,8 +210,6 @@ async function profiles(
     exactKeys(agent, agentKeys, location);
     const config = harnessConfig(agent, location);
     const allowedDelegates = delegates(agent.delegates, location);
-    if (config.harness !== "claude" && allowedDelegates.length > 0)
-      throw new Error(`${location}.delegates requires the claude harness`);
     return {
       name,
       description: requiredString(agent, "description", location),

@@ -159,6 +159,115 @@ process.stdin.on("data", async (chunk) => {
   }
 });
 
+test("Pi worker delegates to an allowed Claude child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-pi-delegate-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(agentDir, "subagents.yaml"),
+    `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect.
+  worker-sol:
+    description: Implement.
+    harness: pi
+    model: openai-codex/gpt-5.6-sol
+    thinking: high
+    delegates: [scout]
+    system: Delegate before implementing.
+`,
+  );
+  const clientUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+    ),
+  ).href;
+  const transportUrl = pathToFileURL(
+    join(
+      process.cwd(),
+      "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+    ),
+  ).href;
+  await writeFile(
+    join(bin, "claude"),
+    `#!/usr/bin/env node
+process.stdin.on("data", () => {
+  process.stdout.write(JSON.stringify({ type: "result", result: "scout report" }) + "\\n");
+});
+`,
+  );
+  await writeFile(
+    join(bin, "pi"),
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[args.indexOf("--model") + 1] !== "openai-codex/gpt-5.6-sol" ||
+    args[args.indexOf("--thinking") + 1] !== "high" ||
+    !args.includes("--extension") ||
+    !process.env.PI_SUBAGENTS_MCP_URL || !process.env.PI_SUBAGENTS_MCP_AUTHORIZATION) {
+  process.exit(1);
+}
+const { Client } = await import(${JSON.stringify(clientUrl)});
+const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+process.stdin.on("data", async () => {
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(process.env.PI_SUBAGENTS_MCP_URL), {
+    requestInit: { headers: { Authorization: process.env.PI_SUBAGENTS_MCP_AUTHORIZATION } },
+  }));
+  const result = await client.callTool({ name: "subagent", arguments: {
+    id: "code", name: "scout", prompt: "Inspect the change",
+  } });
+  await client.close();
+  process.stdout.write(JSON.stringify({ type: "message_end", message: {
+    role: "assistant", content: [{ type: "text", text: result.content[0].text }],
+  } }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+});
+`,
+  );
+  await chmod(join(bin, "claude"), 0o755);
+  await chmod(join(bin, "pi"), 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootMessage: async () => undefined,
+  });
+  try {
+    const worker = await runtime.start({
+      id: "implementation",
+      name: "worker-sol",
+      prompt: "Implement the change",
+    });
+    await until(
+      () =>
+        runtime.list().find((run) => run.runId === worker.runId)?.status !==
+        "running",
+    );
+    const runs = runtime.list();
+    const completedWorker = runs.find((run) => run.runId === worker.runId);
+    assert.equal(completedWorker?.status, "completed", completedWorker?.error);
+    const child = runs.find((run) => run.parentRunId === worker.runId);
+    assert.equal(child?.agent, "scout");
+    assert.equal(child?.result?.finalText, "scout report");
+    assert.match(completedWorker?.result?.finalText ?? "", /scout report/);
+  } finally {
+    await runtime.close();
+    process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Stopping a direct running child cancels it and wakes the root", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-"));
   const agentDir = join(root, "agent");

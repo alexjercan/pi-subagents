@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-26
+
+### Changed
+
+- Update the bundled Pi scout example to GPT-6 Luna.
+
+### Fixed
+
+- Allow Pi harness agents to delegate to configured child agents.
+
 ## [0.1.6] - 2026-09-24
 
 ### Added
@@ -66,7 +76,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/alexjercan/pi-subagents/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/alexjercan/pi-subagents/compare/v0.1.3...v0.1.4

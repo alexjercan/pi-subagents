@@ -105,6 +105,37 @@ test("Trusted project agents override user agents by name", async () => {
   }
 });
 
+test("Pi agents can delegate configured child agents", async () => {
+  const files = await configuration(
+    `agents:
+  worker-sol:
+    description: Implement.
+    harness: pi
+    model: openai-codex/gpt-5.6-sol
+    thinking: high
+    delegates: [scout]
+    system: Implement and delegate.
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect.
+`,
+    undefined,
+  );
+  try {
+    const loaded = await loadAgentProfiles({
+      cwd: files.cwd,
+      agentDir: files.agentDir,
+      projectTrusted: false,
+    });
+    assert.deepEqual(loaded[0]?.delegates, ["scout"]);
+  } finally {
+    await files.close();
+  }
+});
+
 test("Untrusted project configuration is not read", async () => {
   const files = await configuration(
     `agents:
@@ -163,7 +194,7 @@ test("Example profiles define configured agent roles", async () => {
         },
         {
           name: "pi-scout",
-          model: "openai-codex/gpt-5.6-luna",
+          model: "openai-codex/gpt-6-luna",
           thinking: "medium",
           tools: ["read", "ls", "grep", "find"],
           delegates: [],
@@ -294,18 +325,6 @@ test("Invalid agent configuration fails the complete source file", async () => {
       source: `agents:
   worker:
     description: Implement.
-    harness: pi
-    model: openai/gpt-test
-    thinking: medium
-    delegates: [worker]
-    system: Implement.
-`,
-      error: /delegates requires the claude harness/,
-    },
-    {
-      source: `agents:
-  worker:
-    description: Implement.
     harness: claude
     model: opus
     thinking: medium
@@ -318,8 +337,8 @@ test("Invalid agent configuration fails the complete source file", async () => {
       source: `agents:
   first:
     description: First.
-    harness: claude
-    model: opus
+    harness: pi
+    model: openai/gpt-test
     thinking: medium
     delegates: [second]
     system: First.
