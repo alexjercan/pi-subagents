@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid persisting full subagent event histories in tool results, which could make Pi sessions too large to resume.
+
 ## [0.1.7] - 2026-09-26
 
 ### Changed

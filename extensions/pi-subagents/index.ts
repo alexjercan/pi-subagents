@@ -10,7 +10,7 @@ import {
 import { activeAgentTree, renderAgentTree, type AgentTreeTheme } from "./ui.ts";
 
 interface SubagentDetails {
-  runs: AgentRunSnapshot[];
+  run?: Pick<AgentRunSnapshot, "id" | "agent">;
   inventory?: AgentInventory;
   error?: boolean;
 }
@@ -27,10 +27,7 @@ function colors(theme: Theme): AgentTreeTheme {
   };
 }
 
-function errorResult(
-  error: unknown,
-  runs: AgentRunSnapshot[] = [],
-): {
+function errorResult(error: unknown): {
   content: Array<{ type: "text"; text: string }>;
   details: SubagentDetails;
   isError: true;
@@ -42,7 +39,7 @@ function errorResult(
         text: error instanceof Error ? error.message : String(error),
       },
     ],
-    details: { runs, error: true },
+    details: { error: true },
     isError: true,
   };
 }
@@ -145,11 +142,11 @@ export default function piSubagents(pi: ExtensionAPI): void {
               text: `Started subagent ${run.id} using ${run.agent}`,
             },
           ],
-          details: { runs: [run] },
+          details: { run: { id: run.id, agent: run.agent } },
           terminate: true,
         };
       } catch (error) {
-        return errorResult(error, runtime.list());
+        return errorResult(error);
       }
     },
     renderCall(args, theme) {
@@ -164,7 +161,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
       const fallback = content?.type === "text" ? content.text : "(no output)";
       const details = result.details as SubagentDetails | undefined;
       if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
-      const run = details?.runs[0];
+      const run = details?.run;
       if (!run) return new Text(fallback, 0, 0);
       return new Text(
         `${theme.fg("success", "started")} ${theme.fg("accent", run.id)} ${theme.fg("muted", `(${run.agent})`)}`,
@@ -192,11 +189,11 @@ export default function piSubagents(pi: ExtensionAPI): void {
         await runtime.message(undefined, params.id, params.message);
         return {
           content: [{ type: "text", text: `Message sent to ${params.id}` }],
-          details: { runs: runtime.list() },
+          details: undefined,
           terminate: true,
         };
       } catch (error) {
-        return errorResult(error, runtime.list());
+        return errorResult(error);
       }
     },
     renderResult(result, _options, theme) {
@@ -226,11 +223,11 @@ export default function piSubagents(pi: ExtensionAPI): void {
               text: `Stopped subagent ${run.id} with status ${run.status}`,
             },
           ],
-          details: { runs: runtime.list() },
+          details: undefined,
           terminate: true,
         };
       } catch (error) {
-        return errorResult(error, runtime.list());
+        return errorResult(error);
       }
     },
     renderResult(result, _options, theme) {
@@ -252,10 +249,10 @@ export default function piSubagents(pi: ExtensionAPI): void {
         const inventory = await runtime.inventory();
         return {
           content: [{ type: "text", text: JSON.stringify(inventory) }],
-          details: { runs: runtime.list(), inventory },
+          details: { inventory },
         };
       } catch (error) {
-        return errorResult(error, runtime.list());
+        return errorResult(error);
       }
     },
     renderResult(result, _options, theme) {

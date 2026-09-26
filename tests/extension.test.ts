@@ -81,7 +81,7 @@ test("Delegated Pi children leave subagent tools to the bridge", () => {
   assert.equal(tools, 0);
 });
 
-test("Root delegation terminates its turn and wakes on each child completion", async () => {
+test("Root delegation wakes on completion without persisting agent event histories", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagents-extension-"));
   const project = join(directory, "project");
   await mkdir(join(project, ".pi"), { recursive: true });
@@ -240,6 +240,16 @@ process.stdin.once("data", (chunk) => {
         /total: 2  completed: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
       ),
     );
+    const messageTool = tools.get("subagent_message");
+    assert.ok(messageTool);
+    const sent = await messageTool.execute(
+      "message-call",
+      { id: "slow", message: "Continue" },
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    assert.equal(sent.terminate, true);
     await until(() => messages.length >= 2);
     assert.deepEqual(messages[1], {
       message: {
@@ -250,6 +260,35 @@ process.stdin.once("data", (chunk) => {
       options: { triggerTurn: true, deliverAs: "steer" },
     });
     await until(() => widgets.at(-1) === undefined);
+    const stoppedRun = await tool.execute(
+      "stopped-call",
+      { id: "stopped", name: "scout", prompt: "Slow" },
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    const stopTool = tools.get("subagent_stop");
+    assert.ok(stopTool);
+    const stopped = await stopTool.execute(
+      "stop-call",
+      { id: "stopped" },
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    assert.equal(stopped.terminate, true);
+    for (const result of [
+      slow,
+      fast,
+      listed,
+      pending,
+      sent,
+      stoppedRun,
+      stopped,
+    ]) {
+      assert.ok(JSON.stringify(result).length < 10_000);
+      assert.ok(!JSON.stringify(result.details ?? {}).includes('"events"'));
+    }
     assert.deepEqual(inputs, []);
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
