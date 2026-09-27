@@ -214,6 +214,45 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   });
 });
 
+test("A harness can accept another prompt after a settled turn", async () => {
+  let turns = 0;
+  let finishFirstTurn: () => void = () => undefined;
+  const firstTurn = new Promise<void>((resolve) => {
+    finishFirstTurn = resolve;
+  });
+  const run = spawnHarness(
+    { cwd: process.cwd(), prompt: "first" },
+    {
+      harness: "claude",
+      model: "haiku",
+      thinking: "low",
+      permissionMode: "bypassPermissions",
+    },
+    {
+      system: "Reply briefly.",
+      onTurnSettled: () => {
+        turns += 1;
+        if (turns === 1) {
+          finishFirstTurn();
+          return false;
+        }
+        return true;
+      },
+    },
+    () => undefined,
+  );
+  try {
+    await firstTurn;
+    await run.send("second");
+    const result = await run.completion;
+    assert.equal(turns, 2);
+    assert.equal(result.finalText, "claude finished");
+    assert.equal(result.exitCode, 0);
+  } finally {
+    run.stop();
+  }
+});
+
 test("Malformed harness output rejects completion", async () => {
   const run = spawnHarness(
     { cwd: process.cwd(), prompt: "malformed" },

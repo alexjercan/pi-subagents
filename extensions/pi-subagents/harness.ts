@@ -31,6 +31,7 @@ export interface HarnessRequest {
 export interface HarnessLaunchOptions {
   system: string;
   tools?: AgentTool[];
+  onTurnSettled?: () => boolean;
   delegation?: {
     url: string;
     authorization: string;
@@ -98,7 +99,7 @@ export function spawnHarness(
     for (const event of normalized.events) onEvent(event);
     if (normalized.settled) {
       settled = true;
-      processRun.end();
+      if (options.onTurnSettled?.() ?? true) processRun.end();
     }
   });
   let initialError: unknown;

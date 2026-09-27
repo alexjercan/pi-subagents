@@ -144,6 +144,10 @@ export async function createAgentRuntime(
   const questions = new Map<string, PendingQuestion>();
   const stateWaiters = new Map<string, Set<() => void>>();
   const stopping = new Set<string>();
+  const idleOwners = new Set<string>();
+  const pendingNotifications = new Map<string, string[]>();
+  const delivering = new Set<string>();
+  const deliveryFailures = new Map<string, string>();
   let closing = false;
   let host: DelegationHost;
 
@@ -176,6 +180,47 @@ export async function createAgentRuntime(
     questions.get(runId)?.reject(new Error("Agent was cancelled"));
     questions.delete(runId);
     active.get(runId)?.stop();
+  };
+  const deliver = (ownerRunId: string) => {
+    const run = active.get(ownerRunId);
+    const messages = pendingNotifications.get(ownerRunId);
+    if (!run || !messages?.length || stopping.has(ownerRunId) || closing)
+      return;
+    pendingNotifications.delete(ownerRunId);
+    idleOwners.delete(ownerRunId);
+    delivering.add(ownerRunId);
+    void run.send(messages.join("\n\n")).catch((error: unknown) => {
+      if (stopping.has(ownerRunId) || closing || !active.has(ownerRunId))
+        return;
+      deliveryFailures.set(
+        ownerRunId,
+        `Could not deliver child update: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      stopTree(ownerRunId);
+    });
+  };
+  const notifyOwner = (ownerRunId: string, message: string) => {
+    if (!active.has(ownerRunId) || stopping.has(ownerRunId) || closing) return;
+    const messages = pendingNotifications.get(ownerRunId) ?? [];
+    messages.push(message);
+    pendingNotifications.set(ownerRunId, messages);
+    if (idleOwners.has(ownerRunId)) deliver(ownerRunId);
+  };
+  const turnSettled = (runId: string): boolean => {
+    delivering.delete(runId);
+    idleOwners.add(runId);
+    if (pendingNotifications.get(runId)?.length) {
+      deliver(runId);
+      return false;
+    }
+    if (
+      [...snapshots.values()].some(
+        (run) => run.parentRunId === runId && active.has(run.runId),
+      )
+    )
+      return false;
+    idleOwners.delete(runId);
+    return true;
   };
   const profiles = () => loadAgentProfiles(options);
   const allowedProfiles = async (ownerRunId?: string) => {
@@ -214,15 +259,6 @@ export async function createAgentRuntime(
       waiters.add(resolve);
       stateWaiters.set(runId, waiters);
     });
-  const waitForChild = async (
-    ownerRunId: string,
-    id: string,
-  ): Promise<OwnedAgentRun> => {
-    const snapshot = child(ownerRunId, id);
-    if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
-    while (snapshot.status === "running") await nextState(snapshot.runId);
-    return ownedRun(snapshot);
-  };
   const stop = async (
     ownerRunId: string | undefined,
     id: string,
@@ -300,6 +336,11 @@ export async function createAgentRuntime(
       throw new Error("Question was cancelled");
     }
     signal.addEventListener("abort", abort, { once: true });
+    if (snapshot.parentRunId)
+      notifyOwner(
+        snapshot.parentRunId,
+        `Subagent ${snapshot.id} is waiting for an answer.\nQuestion: ${prompt}\nAnswer it with subagent_message using id ${snapshot.id}.`,
+      );
     if (!snapshot.parentRunId) {
       const onRootQuestion = options.onRootQuestion;
       if (!onRootQuestion) {
@@ -324,13 +365,30 @@ export async function createAgentRuntime(
     try {
       const result = await run.completion;
       snapshot.result = result;
-      if (result.signal !== null) {
+      const deliveryFailure = deliveryFailures.get(snapshot.runId);
+      const unfinishedChild = [...snapshots.values()].some(
+        (candidate) =>
+          candidate.parentRunId === snapshot.runId &&
+          active.has(candidate.runId),
+      );
+      if (deliveryFailure) {
+        snapshot.status = "failed";
+        snapshot.error = deliveryFailure;
+      } else if (result.signal !== null) {
         snapshot.status = "cancelled";
         snapshot.error = "Agent was cancelled";
       } else if (result.exitCode !== 0) {
         snapshot.status = "failed";
         snapshot.error =
           result.stderr.trim() || `Agent exited with code ${result.exitCode}`;
+      } else if (
+        !closing &&
+        (unfinishedChild ||
+          pendingNotifications.has(snapshot.runId) ||
+          delivering.has(snapshot.runId))
+      ) {
+        snapshot.status = "failed";
+        snapshot.error = "Agent exited before receiving child updates";
       } else {
         snapshot.status = "completed";
       }
@@ -341,6 +399,10 @@ export async function createAgentRuntime(
       snapshot.endedAt = Date.now();
       active.delete(snapshot.runId);
       stopping.delete(snapshot.runId);
+      idleOwners.delete(snapshot.runId);
+      pendingNotifications.delete(snapshot.runId);
+      delivering.delete(snapshot.runId);
+      deliveryFailures.delete(snapshot.runId);
       questions
         .get(snapshot.runId)
         ?.reject(
@@ -357,9 +419,16 @@ export async function createAgentRuntime(
       signalState(snapshot.runId);
       emit();
     }
+    const output = snapshot.error
+      ? `${snapshot.error}${snapshot.result?.finalText ? `\n${snapshot.result.finalText}` : ""}`
+      : snapshot.result?.finalText || "(no output)";
+    if (!closing && snapshot.parentRunId && active.has(snapshot.parentRunId)) {
+      notifyOwner(
+        snapshot.parentRunId,
+        `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+      );
+    }
     if (!closing && !snapshot.parentRunId) {
-      const output =
-        snapshot.result?.finalText || snapshot.error || "(no output)";
       try {
         await options.onRootMessage?.(
           `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
@@ -405,6 +474,7 @@ export async function createAgentRuntime(
           system: profile.system,
           tools: profile.tools,
           delegation: { url: host.url, authorization },
+          onTurnSettled: () => turnSettled(runId),
         },
         (event) => {
           const snapshot = snapshots.get(runId);
@@ -453,11 +523,15 @@ export async function createAgentRuntime(
   host = await createDelegationHost({
     async start(callerRunId, id, name, prompt) {
       await start({ id, name, prompt, parentRunId: callerRunId });
-      return waitForChild(callerRunId, id);
+      const snapshot = child(callerRunId, id);
+      if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+      return ownedRun(snapshot);
     },
     async message(callerRunId, id, value) {
       await message(callerRunId, id, value);
-      return waitForChild(callerRunId, id);
+      const snapshot = child(callerRunId, id);
+      if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
+      return ownedRun(snapshot);
     },
     stop,
     list: (callerRunId) => inventory(callerRunId),

@@ -14,10 +14,11 @@ pi -e ./extensions/pi-subagents/index.ts
 Call `subagent_list` to discover configured agent kinds. Start one with
 `subagent`, using a distinct owner-scoped `id`, configured `name`, and initial
 `prompt`. The root turn stops after starting children and wakes on each root
-child completion with that child's final output. Nested delegation calls wait
-without polling and return the child's final output. Root child questions open
-a user input directly. Stop a running or waiting direct child and its subtree
-with `subagent_stop` and its `id`. The call waits for the cancelled state and
+child completion with that child's final output. Nested delegation calls return
+the child's current state promptly. Completion and questions are sent to the
+direct owner's next turn without polling. Root child questions open a user input
+directly. Stop a running or waiting direct child and its subtree with
+`subagent_stop` and its `id`. The call waits for the cancelled state and
 fails if the child completes or fails first. Unknown ids, ids owned by another
 agent, and finished or stopping children fail. A stopping subtree accepts no
 messages, questions, or new children. A root stop ends the turn and wakes on the

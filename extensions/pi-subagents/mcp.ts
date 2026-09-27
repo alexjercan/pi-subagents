@@ -123,7 +123,7 @@ export async function createDelegationHost(
       "subagent",
       {
         description:
-          "Start a configured direct child and wait without polling for completion or a question.",
+          "Start a configured direct child and return its current state. Child completion and questions are sent to this owner automatically.",
         inputSchema: {
           id: z.string().min(1),
           name: z.string().min(1),
@@ -146,7 +146,7 @@ export async function createDelegationHost(
       "subagent_message",
       {
         description:
-          "Send a message to a directly owned child and wait without polling for its next state.",
+          "Send a message to a directly owned child and return its current state. Child completion and questions are sent to this owner automatically.",
         inputSchema: {
           id: z.string().min(1),
           message: z.string().min(1),
