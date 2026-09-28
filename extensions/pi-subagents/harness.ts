@@ -69,6 +69,7 @@ export type HarnessEvent =
 export interface HarnessResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  settled: boolean;
   finalText: string;
   stderr: string;
 }
@@ -92,6 +93,7 @@ export function spawnHarness(
       : createClaudeAdapter(request, config, options);
   let finalText = "";
   let settled = false;
+  let stopRequested = false;
   let idle = false;
   let processRun!: ReturnType<typeof spawnJsonlProcess>;
   processRun = spawnJsonlProcess(adapter.process, (value) => {
@@ -118,13 +120,16 @@ export function spawnHarness(
       idle = false;
       return processRun.send(command);
     },
-    stop: processRun.stop,
+    stop: () => {
+      stopRequested = true;
+      processRun.stop();
+    },
     completion: Promise.all([initialized, processRun.completion]).then(
       ([, result]) => {
         if (initialError) throw initialError;
-        if (!settled && result.signal === null)
+        if (!settled && result.signal === null && !stopRequested)
           throw new Error("Harness exited before reporting completion");
-        return { ...result, finalText };
+        return { ...result, settled, finalText };
       },
     ),
   };

@@ -410,6 +410,72 @@ process.stdin.on("data", async (chunk) => {
   }
 });
 
+for (const harness of ["claude", "pi"] as const) {
+  test(`Stopping a ${harness} harness that exits cleanly without settlement cancels it`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-clean-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    const bin = join(root, "bin");
+    const ready = join(root, "ready");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(agentDir, "subagents.yaml"),
+      `agents:
+  worker:
+    description: Inspect.
+    harness: ${harness}
+    model: ${harness === "pi" ? "openai/gpt-test" : "haiku"}
+    thinking: medium
+    system: Wait until stopped.
+`,
+    );
+    const fixture = `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+process.stdin.once("data", () => writeFileSync(${JSON.stringify(ready)}, ""));
+process.on("SIGTERM", () => process.exit(0));
+`;
+    const executable = join(bin, harness);
+    await writeFile(executable, fixture);
+    await chmod(executable, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    const rootMessages: string[] = [];
+    const runtime = await createAgentRuntime({
+      cwd,
+      agentDir,
+      projectTrusted: false,
+      onRootMessage: (message) => {
+        rootMessages.push(message);
+      },
+    });
+    try {
+      await runtime.start({
+        id: "implementation",
+        name: "worker",
+        prompt: "Wait",
+      });
+      await until(() => existsSync(ready));
+      assert.deepEqual(await runtime.stop(undefined, "implementation"), {
+        id: "implementation",
+        name: "worker",
+        status: "cancelled",
+        error: "Agent was cancelled",
+      });
+      await until(() => rootMessages.length > 0);
+      assert.equal(
+        rootMessages[0],
+        "Subagent implementation finished with status cancelled.\nAgent was cancelled",
+      );
+    } finally {
+      await runtime.close();
+      process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("Stopping a direct running child cancels it and wakes the root", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-"));
   const agentDir = join(root, "agent");

@@ -374,6 +374,9 @@ export async function createAgentRuntime(
       if (deliveryFailure) {
         snapshot.status = "failed";
         snapshot.error = deliveryFailure;
+      } else if (stopping.has(snapshot.runId) && !result.settled) {
+        snapshot.status = "cancelled";
+        snapshot.error = "Agent was cancelled";
       } else if (result.signal !== null) {
         snapshot.status = "cancelled";
         snapshot.error = "Agent was cancelled";

@@ -28,6 +28,7 @@ process.stdin.on("data", (chunk) => {
       process.stdout.write("not-json\\n");
       continue;
     }
+    if (prompt === "exit-unsettled") process.exit(0);
     if (prompt === "wait") continue;
     if (harness === "pi" && prompt === "second" && command.type !== "prompt") continue;
     const events = harness === "pi" ? [
@@ -305,6 +306,19 @@ test("Malformed harness output rejects completion", async () => {
     () => undefined,
   );
   await assert.rejects(run.completion, SyntaxError);
+});
+
+test("An unsolicited clean exit before settlement fails loudly", async () => {
+  const run = spawnHarness(
+    { cwd: process.cwd(), prompt: "exit-unsettled" },
+    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    { system: "Inspect." },
+    () => undefined,
+  );
+  await assert.rejects(
+    run.completion,
+    /^Error: Harness exited before reporting completion$/,
+  );
 });
 
 test("A running harness accepts a steering message", async () => {
