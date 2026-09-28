@@ -329,14 +329,20 @@ test("Pi worker delegates to an allowed Claude child", async () => {
   await writeFile(
     join(bin, "claude"),
     `#!/usr/bin/env node
+const { existsSync } = await import("node:fs");
 process.stdin.on("data", () => {
-  process.stdout.write(JSON.stringify({ type: "result", result: "scout report" }) + "\\n");
+  const interval = setInterval(() => {
+    if (!existsSync(${JSON.stringify(join(root, "worker-settled"))})) return;
+    clearInterval(interval);
+    process.stdout.write(JSON.stringify({ type: "result", result: "scout report" }) + "\\n");
+  }, 5);
 });
 `,
   );
   await writeFile(
     join(bin, "pi"),
     `#!/usr/bin/env node
+const { writeFileSync } = await import("node:fs");
 const args = process.argv.slice(2);
 if (args[args.indexOf("--model") + 1] !== "openai-codex/gpt-5.6-sol" ||
     args[args.indexOf("--thinking") + 1] !== "high" ||
@@ -349,6 +355,7 @@ const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transpor
 process.stdin.on("data", async (chunk) => {
   const command = JSON.parse(chunk.toString());
   let output = command.message;
+  if (JSON.stringify(output).includes("Subagent code finished") && command.type !== "prompt") return;
   if (!JSON.stringify(output).includes("Subagent code finished")) {
     const client = new Client({ name: "fixture", version: "1.0.0" });
     await client.connect(new StreamableHTTPClientTransport(new URL(process.env.PI_SUBAGENTS_MCP_URL), {
@@ -364,6 +371,7 @@ process.stdin.on("data", async (chunk) => {
     role: "assistant", content: [{ type: "text", text: JSON.stringify(output) }],
   } }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+  setTimeout(() => writeFileSync(${JSON.stringify(join(root, "worker-settled"))}, "ready"), 30);
 });
 `,
   );

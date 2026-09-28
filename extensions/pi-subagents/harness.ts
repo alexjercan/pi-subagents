@@ -92,6 +92,7 @@ export function spawnHarness(
       : createClaudeAdapter(request, config, options);
   let finalText = "";
   let settled = false;
+  let idle = false;
   let processRun!: ReturnType<typeof spawnJsonlProcess>;
   processRun = spawnJsonlProcess(adapter.process, (value) => {
     const normalized = adapter.normalize(value);
@@ -99,6 +100,7 @@ export function spawnHarness(
     for (const event of normalized.events) onEvent(event);
     if (normalized.settled) {
       settled = true;
+      idle = true;
       if (options.onTurnSettled?.() ?? true) processRun.end();
     }
   });
@@ -111,7 +113,11 @@ export function spawnHarness(
     });
   return {
     pid: processRun.pid,
-    send: (message) => processRun.send(adapter.steer(message)),
+    send: (message) => {
+      const command = idle ? adapter.initial(message) : adapter.steer(message);
+      idle = false;
+      return processRun.send(command);
+    },
     stop: processRun.stop,
     completion: Promise.all([initialized, processRun.completion]).then(
       ([, result]) => {

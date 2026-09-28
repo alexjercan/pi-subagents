@@ -19,17 +19,18 @@ let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   input += chunk;
-  const newline = input.indexOf("\\n");
-  if (newline < 0) return;
-  const command = JSON.parse(input.slice(0, newline));
-  const prompt = command.message?.content ?? command.message;
-  input = input.slice(newline + 1);
-  if (prompt === "malformed") {
-    process.stdout.write("not-json\\n");
-    return;
-  }
-  if (prompt === "wait") return;
-  const events = harness === "pi" ? [
+  while (input.includes("\\n")) {
+    const newline = input.indexOf("\\n");
+    const command = JSON.parse(input.slice(0, newline));
+    const prompt = command.message?.content ?? command.message;
+    input = input.slice(newline + 1);
+    if (prompt === "malformed") {
+      process.stdout.write("not-json\\n");
+      continue;
+    }
+    if (prompt === "wait") continue;
+    if (harness === "pi" && prompt === "second" && command.type !== "prompt") continue;
+    const events = harness === "pi" ? [
     { type: "tool_execution_start", toolCallId: "pi-call", toolName: "read", args: { path: "README.md" } },
     { type: "tool_execution_end", toolCallId: "pi-call", toolName: "read", result: { content: [{ type: "text", text: "read output" }] }, isError: false },
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "pi finished" }], usage: { input: 10, output: 2, cacheRead: 4, cacheWrite: 1, totalTokens: 17, cost: { total: 0.25 } } } },
@@ -39,7 +40,8 @@ process.stdin.on("data", (chunk) => {
     { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "claude-call", content: "read output", is_error: false }] } },
     { type: "result", result: "claude finished", usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 1 }, total_cost_usd: 0.5 }
   ];
-  for (const event of events) process.stdout.write(JSON.stringify(event) + "\\n");
+    for (const event of events) process.stdout.write(JSON.stringify(event) + "\\n");
+  }
 });
 `;
 
@@ -247,6 +249,48 @@ test("A harness can accept another prompt after a settled turn", async () => {
     const result = await run.completion;
     assert.equal(turns, 2);
     assert.equal(result.finalText, "claude finished");
+    assert.equal(result.exitCode, 0);
+  } finally {
+    run.stop();
+  }
+});
+
+test("An idle Pi harness resumes when sent a second prompt", async () => {
+  let turns = 0;
+  let finishFirstTurn: () => void = () => undefined;
+  const firstTurn = new Promise<void>((resolve) => {
+    finishFirstTurn = resolve;
+  });
+  const run = spawnHarness(
+    { cwd: process.cwd(), prompt: "first" },
+    { harness: "pi", model: "openai/gpt-test", thinking: "medium" },
+    {
+      system: "Reply briefly.",
+      onTurnSettled: () => {
+        turns += 1;
+        if (turns === 1) {
+          finishFirstTurn();
+          return false;
+        }
+        return true;
+      },
+    },
+    () => undefined,
+  );
+  try {
+    await firstTurn;
+    await run.send("second");
+    const result = await Promise.race([
+      run.completion,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Idle Pi harness did not resume")),
+          500,
+        ),
+      ),
+    ]);
+    assert.equal(turns, 2);
+    assert.equal(result.finalText, "pi finished");
     assert.equal(result.exitCode, 0);
   } finally {
     run.stop();

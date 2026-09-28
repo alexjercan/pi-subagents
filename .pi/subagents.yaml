@@ -16,6 +16,23 @@ agents:
       Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
       Keep the report concise and implementation-oriented.
 
+  scout-luna:
+    description: Gather focused codebase context for implementation agents using Luna.
+    harness: pi
+    model: openai-codex/gpt-6-luna
+    thinking: medium
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+    system: |
+      Gather focused information from the project for another agent.
+      Inspect only the area required by the task.
+      Do not modify files.
+      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Keep the report concise and implementation-oriented.
+
   basic:
     description: Handle focused, routine repository tasks.
     harness: pi
@@ -47,13 +64,38 @@ agents:
       Return a concise synthesis with source URLs, important details, and uncertainties.
       Do not inspect or modify project files.
 
-  worker:
-    description: Implement a task using focused context gathered by scouts and verified by review.
+  worker-claude:
+    description: Implement a task using Opus, focused scout context, and review.
     harness: claude
     model: opus
     thinking: high
     delegates:
       - scout
+      - scout-luna
+      - research
+      - review
+    system: |
+      Implement the requested change.
+      Before implementation, call subagent_list to inspect the configured delegate kinds.
+      Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
+      Continue useful work while delegated tasks run.
+      Completed children will wake you with their final output.
+      Use subagent_message to steer a running child or answer its question.
+      Use subagent_ask when a decision must come from your owner.
+      Do not repeat broad project discovery yourself.
+      Inspect additional files only when implementation requires it.
+      Run the relevant checks.
+      Delegate verification when an appropriate configured kind is available.
+      Address actionable findings before reporting the completed change.
+
+  worker-sol:
+    description: Implement a task using Sol, focused scout context, and review.
+    harness: pi
+    model: openai-codex/gpt-6-sol
+    thinking: high
+    delegates:
+      - scout
+      - scout-luna
       - research
       - review
     system: |

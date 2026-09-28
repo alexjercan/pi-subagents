@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-28
+
+### Added
+
+- Add project agent profiles for a Pi GPT-6 Sol worker and Luna scout alongside the Claude Opus worker and Haiku scout.
+
+### Fixed
+
+- Resume idle Pi workers with a prompt when a delegated child finishes, while retaining steering for active turns.
+
 ## [0.1.8] - 2026-09-28
 
 ### Changed
@@ -86,7 +96,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/alexjercan/pi-subagents/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/alexjercan/pi-subagents/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...v0.1.6
