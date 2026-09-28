@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-28
+
+### Changed
+
+- Return promptly from nested delegation calls and push child completions and questions to their direct owner.
+
 ### Fixed
 
 - Avoid persisting full subagent event histories in tool results, which could make Pi sessions too large to resume.
@@ -80,7 +86,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/alexjercan/pi-subagents/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/alexjercan/pi-subagents/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/alexjercan/pi-subagents/compare/v0.1.4...v0.1.5
