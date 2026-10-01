@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-01
+
+### Changed
+
+- Save new Claude child sessions under their subagent run IDs for inspection while keeping completion reports in the parent Pi session.
+
 ## [0.1.9] - 2026-09-28
 
 ### Added
@@ -96,7 +102,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/alexjercan/pi-subagents/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/alexjercan/pi-subagents/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/alexjercan/pi-subagents/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/alexjercan/pi-subagents/compare/v0.1.6...v0.1.7

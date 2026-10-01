@@ -26,6 +26,7 @@ export type HarnessConfig =
 export interface HarnessRequest {
   cwd: string;
   prompt: string;
+  sessionId?: string;
 }
 
 export interface HarnessLaunchOptions {

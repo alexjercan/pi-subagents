@@ -8,6 +8,7 @@ import {
   type HarnessEvent,
 } from "../extensions/pi-subagents/harness.ts";
 
+const claudeSessionId = "5f0c2d1e-8a4b-4c3d-9e2f-1a2b3c4d5e6f";
 let fixtureDirectory = "";
 let previousPath = "";
 
@@ -117,7 +118,11 @@ test("Pi emits messages, tool lifecycle, usage, and configured arguments", async
 test("Claude emits messages, tool lifecycle, usage, and configured invocation", async () => {
   const events: HarnessEvent[] = [];
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "inspect" },
+    {
+      cwd: process.cwd(),
+      prompt: "inspect",
+      sessionId: claudeSessionId,
+    },
     {
       harness: "claude",
       model: "sonnet",
@@ -145,9 +150,10 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   assert.equal(result.finalText, "claude finished");
   assert.equal(invocation.disableBackgroundTasks, "1");
   assert.equal(invocation.waitCeiling, "0");
-  assert.deepEqual(invocation.args.slice(0, 8), [
+  assert.deepEqual(invocation.args.slice(0, 9), [
     "--print",
-    "--no-session-persistence",
+    "--session-id",
+    claudeSessionId,
     "--model",
     "sonnet",
     "--effort",
@@ -217,6 +223,24 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   });
 });
 
+test("Claude refuses to launch without a session id", () => {
+  assert.throws(
+    () =>
+      spawnHarness(
+        { cwd: process.cwd(), prompt: "inspect" },
+        {
+          harness: "claude",
+          model: "sonnet",
+          thinking: "high",
+          permissionMode: "bypassPermissions",
+        },
+        { system: "Inspect." },
+        () => undefined,
+      ),
+    /^Error: Claude harness requires a session id$/,
+  );
+});
+
 test("A harness can accept another prompt after a settled turn", async () => {
   let turns = 0;
   let finishFirstTurn: () => void = () => undefined;
@@ -224,7 +248,11 @@ test("A harness can accept another prompt after a settled turn", async () => {
     finishFirstTurn = resolve;
   });
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "first" },
+    {
+      cwd: process.cwd(),
+      prompt: "first",
+      sessionId: claudeSessionId,
+    },
     {
       harness: "claude",
       model: "haiku",
@@ -336,7 +364,11 @@ test("A running harness accepts a steering message", async () => {
 
 test("Stopping a harness terminates its process", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "wait" },
+    {
+      cwd: process.cwd(),
+      prompt: "wait",
+      sessionId: claudeSessionId,
+    },
     {
       harness: "claude",
       model: "sonnet",
@@ -353,7 +385,11 @@ test("Stopping a harness terminates its process", async () => {
 
 test("Claude forwards the configured permission mode", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "inspect" },
+    {
+      cwd: process.cwd(),
+      prompt: "inspect",
+      sessionId: claudeSessionId,
+    },
     {
       harness: "claude",
       model: "sonnet",

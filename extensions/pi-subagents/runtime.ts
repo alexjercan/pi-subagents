@@ -471,7 +471,7 @@ export async function createAgentRuntime(
     let harnessRun: HarnessRun;
     try {
       harnessRun = spawnHarness(
-        { cwd: options.cwd, prompt: request.prompt },
+        { cwd: options.cwd, prompt: request.prompt, sessionId: runId },
         profile.config,
         {
           system: profile.system,

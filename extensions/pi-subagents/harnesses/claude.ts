@@ -48,6 +48,8 @@ export function createClaudeAdapter(
   config: ClaudeConfig,
   options: HarnessLaunchOptions,
 ): HarnessAdapter {
+  if (!request.sessionId)
+    throw new Error("Claude harness requires a session id");
   const toolNames = new Map<string, string>();
   const claudeTools = new Map([
     ["read", "Read"],
@@ -62,7 +64,8 @@ export function createClaudeAdapter(
   ]);
   const args = [
     "--print",
-    "--no-session-persistence",
+    "--session-id",
+    request.sessionId,
     "--model",
     config.model,
     "--effort",
