@@ -125,6 +125,10 @@ function mergeUsage(current: AgentUsage, update: HarnessUsage): void {
   }
 }
 
+function questionNotice(id: string, question: string): string {
+  return `Subagent ${id} is waiting for an answer.\nQuestion: ${question}\nAnswer it with subagent_message using id ${id}.`;
+}
+
 function kind(profile: AgentProfile): AgentKind {
   return {
     name: profile.name,
@@ -167,13 +171,8 @@ export async function createAgentRuntime(
     [...snapshots.values()].find(
       (snapshot) => snapshot.parentRunId === ownerRunId && snapshot.id === id,
     );
-  const markStopping = (runId: string) => {
-    if (active.has(runId)) stopping.add(runId);
-    for (const snapshot of snapshots.values()) {
-      if (snapshot.parentRunId === runId) markStopping(snapshot.runId);
-    }
-  };
   const stopTree = (runId: string) => {
+    if (active.has(runId)) stopping.add(runId);
     for (const snapshot of snapshots.values()) {
       if (snapshot.parentRunId === runId) stopTree(snapshot.runId);
     }
@@ -209,7 +208,15 @@ export async function createAgentRuntime(
   const turnSettled = (runId: string): boolean => {
     delivering.delete(runId);
     idleOwners.add(runId);
-    if (pendingNotifications.get(runId)?.length) {
+    const messages = pendingNotifications.get(runId) ?? [];
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.parentRunId !== runId || snapshot.question === undefined)
+        continue;
+      const notice = questionNotice(snapshot.id, snapshot.question);
+      if (!messages.includes(notice)) messages.push(notice);
+    }
+    if (messages.length > 0) {
+      pendingNotifications.set(runId, messages);
       deliver(runId);
       return false;
     }
@@ -269,7 +276,6 @@ export async function createAgentRuntime(
       snapshot.status === "running" || snapshot.status === "waiting";
     if (!live() || stopping.has(snapshot.runId))
       throw new Error(`Subagent ${id} is not running`);
-    markStopping(snapshot.runId);
     stopTree(snapshot.runId);
     while (live()) await nextState(snapshot.runId);
     if (snapshot.status !== "cancelled")
@@ -337,10 +343,7 @@ export async function createAgentRuntime(
     }
     signal.addEventListener("abort", abort, { once: true });
     if (snapshot.parentRunId)
-      notifyOwner(
-        snapshot.parentRunId,
-        `Subagent ${snapshot.id} is waiting for an answer.\nQuestion: ${prompt}\nAnswer it with subagent_message using id ${snapshot.id}.`,
-      );
+      notifyOwner(snapshot.parentRunId, questionNotice(snapshot.id, prompt));
     if (!snapshot.parentRunId) {
       const onRootQuestion = options.onRootQuestion;
       if (!onRootQuestion) {
@@ -374,12 +377,12 @@ export async function createAgentRuntime(
       if (deliveryFailure) {
         snapshot.status = "failed";
         snapshot.error = deliveryFailure;
-      } else if (stopping.has(snapshot.runId) && !result.settled) {
+      } else if (stopping.has(snapshot.runId) && !result.finished) {
         snapshot.status = "cancelled";
         snapshot.error = "Agent was cancelled";
       } else if (result.signal !== null) {
-        snapshot.status = "cancelled";
-        snapshot.error = "Agent was cancelled";
+        snapshot.status = "failed";
+        snapshot.error = `Agent was terminated by ${result.signal}`;
       } else if (result.exitCode !== 0) {
         snapshot.status = "failed";
         snapshot.error =

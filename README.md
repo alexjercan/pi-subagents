@@ -14,19 +14,22 @@ pi -e ./extensions/pi-subagents/index.ts
 Call `subagent_list` to discover configured agent kinds. Start one with
 `subagent`, using a distinct owner-scoped `id`, configured `name`, and initial
 `prompt`. The root turn stops after starting children and wakes on each root
-child completion with that child's final output. Nested delegation calls return
-the child's current state promptly. Completion and questions are sent to the
-direct owner's next turn without polling. Root child questions open a user input
-directly. Stop a running or waiting direct child and its subtree with
-`subagent_stop` and its `id`. The call waits for the cancelled state and
-fails if the child completes or fails first. Unknown ids, ids owned by another
-agent, and finished or stopping children fail. A stopping subtree accepts no
-messages, questions, or new children. A root stop ends the turn and wakes on the
-normal cancelled completion.
-Nested questions return to the direct owner for an answer through
-`subagent_message`. Profiles load from `~/.pi/agent/subagents.yaml` and trusted
-project profiles load from `.pi/subagents.yaml`. Project profiles override user
-profiles with the same name.
+child completion with the final text of each of that child's turns. Nested
+delegation calls return the child's current state promptly. Completion and
+questions are sent to the direct owner's next turn without polling. Root child
+questions open a user input directly. Stop a running or waiting direct child and
+its subtree with `subagent_stop` and its `id`. The stop sends SIGTERM to the
+process group of each harness in the subtree and SIGKILL after 5 seconds. The
+call waits for the cancelled state and fails if the child completes or fails
+first. Unknown ids, ids owned by another agent, and finished or stopping
+children fail. A stopping subtree accepts no messages, questions, or new
+children. A root stop ends the turn and wakes on the normal cancelled
+completion. Nested questions return to the direct owner for an answer through
+`subagent_message`. The owner receives the question again each time it ends a
+turn while the child still waits. Questions and stops wait without a time limit.
+Profiles load from `~/.pi/agent/subagents.yaml` and trusted project profiles
+load from `.pi/subagents.yaml`. Project profiles override user profiles with the
+same name.
 
 `examples/subagents.yaml` demonstrates `scout`, `pi-scout`, `research`,
 `worker`, and `review`. Copy and adapt it for a project or user configuration.

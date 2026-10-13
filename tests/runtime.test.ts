@@ -1283,3 +1283,247 @@ process.stdin.once("data", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const sdkClientUrl = pathToFileURL(
+  join(
+    process.cwd(),
+    "node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js",
+  ),
+).href;
+const sdkTransportUrl = pathToFileURL(
+  join(
+    process.cwd(),
+    "node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js",
+  ),
+).href;
+
+async function fixtureRuntime(
+  profiles: string,
+  executables: Record<string, string>,
+  rootMessages: string[] = [],
+) {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-lifecycle-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const bin = join(root, "bin");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(agentDir, "subagents.yaml"), profiles);
+  for (const [name, source] of Object.entries(executables)) {
+    await writeFile(join(bin, name), source);
+    await chmod(join(bin, name), 0o755);
+  }
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const runtime = await createAgentRuntime({
+    cwd,
+    agentDir,
+    projectTrusted: false,
+    onRootMessage: (message) => {
+      rootMessages.push(message);
+    },
+  });
+  return {
+    root,
+    runtime,
+    async dispose() {
+      await runtime.close();
+      process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+const ownerWithScout = (harness: "claude" | "pi") => `agents:
+  scout:
+    description: Inspect.
+    harness: claude
+    model: haiku
+    thinking: medium
+    system: Inspect.
+  owner:
+    description: Own.
+    harness: ${harness}
+    model: ${harness === "pi" ? "openai/gpt-test" : "opus"}
+    thinking: medium
+    delegates: [scout]
+    system: Own.
+`;
+
+const idleScout = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[args.indexOf("--model") + 1] === "haiku") {
+  process.on("SIGTERM", () => process.exit(0));
+  process.stdin.resume();
+} else {
+  process.on("SIGTERM", () => process.exit(0));
+  process.stdin.once("data", async () => {
+    const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+    const server = config.mcpServers.pi_subagents;
+    const { Client } = await import(${JSON.stringify(sdkClientUrl)});
+    const { StreamableHTTPClientTransport } = await import(${JSON.stringify(sdkTransportUrl)});
+    const client = new Client({ name: "fixture", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+    await client.callTool({ name: "subagent", arguments: { id: "scout", name: "scout", prompt: "Inspect" } });
+    await client.close();
+    process.stdout.write(JSON.stringify({ type: "result", result: "delegated" }) + "\\n");
+    if (process.env.OWNER_EXITS) setTimeout(() => process.exit(0), 50);
+  });
+}
+`;
+
+const idlePiOwner = `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(143));
+process.stdin.once("data", async () => {
+  const { Client } = await import(${JSON.stringify(sdkClientUrl)});
+  const { StreamableHTTPClientTransport } = await import(${JSON.stringify(sdkTransportUrl)});
+  const client = new Client({ name: "fixture", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(process.env.PI_SUBAGENTS_MCP_URL), { requestInit: { headers: { Authorization: process.env.PI_SUBAGENTS_MCP_AUTHORIZATION } } }));
+  await client.callTool({ name: "subagent", arguments: { id: "scout", name: "scout", prompt: "Inspect" } });
+  await client.close();
+  process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+});
+process.stdin.on("end", () => process.exit(0));
+`;
+
+for (const harness of ["claude", "pi"] as const) {
+  test(`Stopping an idle ${harness} owner that waits for its child cancels both`, async () => {
+    const fixture = await fixtureRuntime(ownerWithScout(harness), {
+      claude: idleScout,
+      ...(harness === "pi" ? { pi: idlePiOwner } : {}),
+    });
+    try {
+      const { runtime } = fixture;
+      await runtime.start({ id: "owner", name: "owner", prompt: "Own" });
+      await until(() =>
+        runtime.list().some((run) => run.id === "scout" && run.pid > 0),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const stopped = await runtime.stop(undefined, "owner");
+      assert.equal(stopped.status, "cancelled");
+      assert.equal(stopped.error, "Agent was cancelled");
+      await until(() =>
+        runtime.list().every((run) => run.status === "cancelled"),
+      );
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
+
+test("A child still running when its owner exits is cancelled", async () => {
+  process.env.OWNER_EXITS = "1";
+  const fixture = await fixtureRuntime(ownerWithScout("claude"), {
+    claude: idleScout,
+  });
+  try {
+    const { runtime } = fixture;
+    await runtime.start({ id: "owner", name: "owner", prompt: "Own" });
+    await until(
+      () =>
+        runtime.list().length === 2 &&
+        runtime.list().every((run) => run.endedAt !== undefined),
+    );
+    assert.deepEqual(
+      runtime.list().map((run) => [run.id, run.status, run.error]),
+      [
+        ["owner", "failed", "Agent exited before receiving child updates"],
+        ["scout", "cancelled", "Agent was cancelled"],
+      ],
+    );
+  } finally {
+    delete process.env.OWNER_EXITS;
+    await fixture.dispose();
+  }
+});
+
+test("A harness killed by a signal this runtime did not send fails with the signal", async () => {
+  const rootMessages: string[] = [];
+  const fixture = await fixtureRuntime(
+    `agents:
+  worker:
+    description: Work.
+    harness: claude
+    model: opus
+    thinking: medium
+    system: Work.
+`,
+    {
+      claude: `#!/usr/bin/env node
+process.stdin.once("data", () => process.kill(process.pid, "SIGKILL"));
+`,
+    },
+    rootMessages,
+  );
+  try {
+    const { runtime } = fixture;
+    await runtime.start({ id: "worker", name: "worker", prompt: "Work" });
+    await until(() => rootMessages.length > 0);
+    assert.equal(
+      rootMessages[0],
+      "Subagent worker finished with status failed.\nAgent was terminated by SIGKILL",
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("An owner that ends its turn without answering is reminded of the question", async () => {
+  const fixture = await fixtureRuntime(ownerWithScout("claude"), {
+    claude: `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+const config = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
+const server = config.mcpServers.pi_subagents;
+const { Client } = await import(${JSON.stringify(sdkClientUrl)});
+const { StreamableHTTPClientTransport } = await import(${JSON.stringify(sdkTransportUrl)});
+const client = new Client({ name: "fixture", version: "1.0.0" });
+await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }));
+let questions = 0;
+let input = "";
+process.stdin.on("end", () => process.exit(0));
+process.stdin.on("data", async (chunk) => {
+  input += chunk;
+  while (input.includes("\\n")) {
+    const newline = input.indexOf("\\n");
+    const content = JSON.parse(input.slice(0, newline)).message.content;
+    input = input.slice(newline + 1);
+    if (model === "haiku") {
+      const answer = await client.callTool({ name: "subagent_ask", arguments: { prompt: "Which file?" } });
+      process.stdout.write(JSON.stringify({ type: "result", result: "scout read " + answer.content[0].text }) + "\\n");
+      continue;
+    }
+    if (content.includes("Subagent scout finished")) {
+      process.stdout.write(JSON.stringify({ type: "result", result: content + " after " + questions + " questions" }) + "\\n");
+      continue;
+    }
+    if (content.includes("Subagent scout is waiting")) {
+      questions += 1;
+      if (questions === 2) await client.callTool({ name: "subagent_message", arguments: { id: "scout", message: "runtime.ts" } });
+      process.stdout.write(JSON.stringify({ type: "result", result: "Waiting on scout" }) + "\\n");
+      continue;
+    }
+    await client.callTool({ name: "subagent", arguments: { id: "scout", name: "scout", prompt: "Inspect" } });
+    process.stdout.write(JSON.stringify({ type: "result", result: "Started scout" }) + "\\n");
+  }
+});
+`,
+  });
+  try {
+    const { runtime } = fixture;
+    await runtime.start({ id: "owner", name: "owner", prompt: "Own" });
+    await until(
+      () =>
+        runtime.list().find((run) => run.id === "owner")?.endedAt !== undefined,
+    );
+    const owner = runtime.list().find((run) => run.id === "owner");
+    assert.equal(owner?.status, "completed", owner?.error);
+    assert.match(
+      owner?.result?.finalText ?? "",
+      /scout read runtime\.ts after 2 questions$/,
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});

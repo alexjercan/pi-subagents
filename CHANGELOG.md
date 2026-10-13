@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Report the final text of every settled turn to the owner, including when a later turn fails, instead of only the last turn.
+- Remind an owner of each unanswered child question every time it ends a turn while the child still waits.
+- Run each harness in its own process group; stop sends SIGTERM to the group and SIGKILL after 5 seconds, and root exit kills every live group.
+
+### Fixed
+
+- Reject writes to a closed harness input instead of crashing the parent Pi session with an uncaught EPIPE.
+- Report stopped owners that wait for children, and children stopped with their owner, as cancelled.
+- Wait without a time limit for `subagent_ask` and `subagent_stop` over MCP by streaming responses with progress keepalives and raising the Claude MCP server timeout.
+- Report Claude result errors, rejected Pi prompts, and Pi turns that end with an error as failed with their messages.
+- Include the exit code and stderr when a harness exits during a turn, and report signals the runtime did not send as failures.
+- Answer Pi dialog requests as cancelled so children cannot block on them.
+
 ## [0.1.10] - 2026-10-01
 
 ### Changed

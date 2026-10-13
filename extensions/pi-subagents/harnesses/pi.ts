@@ -18,6 +18,8 @@ import { SUBAGENT_TOOL_NAMES } from "../tool-names.ts";
 
 type PiConfig = Extract<HarnessConfig, { harness: "pi" }>;
 
+const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+
 export function createPiAdapter(
   request: HarnessRequest,
   config: PiConfig,
@@ -60,8 +62,11 @@ export function createPiAdapter(
           }
         : undefined,
     },
-    initial: (prompt) => ({ type: "prompt", message: prompt }),
-    steer: (message) => ({ type: "steer", message }),
+    prompt: (message) => ({
+      type: "prompt",
+      message,
+      streamingBehavior: "steer",
+    }),
     normalize: normalizePiRecord,
   };
 }
@@ -71,6 +76,25 @@ export function normalizePiRecord(value: unknown): NormalizedRecord {
   const type = string(event?.type);
   if (!event || !type) return { events: [] };
   if (type === "agent_settled") return { events: [], settled: true };
+  if (type === "response") {
+    if (event.success !== false) return { events: [] };
+    return {
+      events: [],
+      error:
+        string(event.error) ??
+        `Pi rejected ${string(event.command) ?? "a command"}`,
+      settled: true,
+    };
+  }
+  if (type === "extension_ui_request") {
+    const id = string(event.id);
+    if (id === undefined || !DIALOG_METHODS.has(string(event.method) ?? ""))
+      return { events: [] };
+    return {
+      events: [],
+      reply: { type: "extension_ui_response", id, cancelled: true },
+    };
+  }
 
   if (type === "tool_execution_start") {
     return {
@@ -121,9 +145,13 @@ export function normalizePiRecord(value: unknown): NormalizedRecord {
       },
     });
   }
-  const finalText =
-    normalizedMessage.role === "assistant"
-      ? textContent(normalizedMessage.content)
-      : undefined;
-  return { events, finalText };
+  if (normalizedMessage.role !== "assistant") return { events };
+  return {
+    events,
+    finalText: textContent(normalizedMessage.content),
+    error:
+      normalizedMessage.value.stopReason === "error"
+        ? (string(normalizedMessage.value.errorMessage) ?? "Pi turn failed")
+        : undefined,
+  };
 }

@@ -95,6 +95,7 @@ export function createClaudeAdapter(
             type: "http",
             url: options.delegation.url,
             headers: { Authorization: options.delegation.authorization },
+            timeout: 2147483647,
           },
         },
       }),
@@ -116,12 +117,7 @@ export function createClaudeAdapter(
         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0",
       },
     },
-    initial: (prompt) => ({
-      type: "user",
-      message: { role: "user", content: prompt },
-      parent_tool_use_id: null,
-    }),
-    steer: (message) => ({
+    prompt: (message) => ({
       type: "user",
       message: { role: "user", content: message },
       parent_tool_use_id: null,
@@ -130,6 +126,26 @@ export function createClaudeAdapter(
       return normalizeClaudeRecord(value, toolNames);
     },
   };
+}
+
+function resultError(
+  event: Record<string, unknown>,
+  finalText: string | undefined,
+): string | undefined {
+  const subtype = string(event.subtype);
+  if (
+    event.is_error !== true &&
+    (subtype === undefined || subtype === "success")
+  )
+    return undefined;
+  const errors = Array.isArray(event.errors)
+    ? event.errors.filter((value): value is string => typeof value === "string")
+    : [];
+  return (
+    errors.join("\n") ||
+    finalText ||
+    `Claude turn failed: ${subtype ?? "error"}`
+  );
 }
 
 export function normalizeClaudeRecord(
@@ -143,6 +159,7 @@ export function normalizeClaudeRecord(
   if (type === "result") {
     const resultUsage = record(event.usage);
     const costUsd = number(event.total_cost_usd);
+    const finalText = string(event.result);
     return {
       events: resultUsage
         ? [
@@ -152,7 +169,8 @@ export function normalizeClaudeRecord(
             },
           ]
         : [],
-      finalText: string(event.result),
+      finalText,
+      error: resultError(event, finalText),
       settled: true,
     };
   }

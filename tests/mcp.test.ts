@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -166,4 +166,103 @@ test("MCP rejects a subagent kind outside the grant", async () => {
     await connected.close();
     await host.close();
   }
+});
+
+test("MCP ask streams response headers before the answer arrives", async () => {
+  let answer: (value: string) => void = () => undefined;
+  const host = await createDelegationHost(
+    operations({
+      ask: () =>
+        new Promise<string>((resolve) => {
+          answer = resolve;
+        }),
+    }),
+  );
+  const authorization = host.grant("worker-run", []);
+  const post = (body: unknown, sessionId?: string) =>
+    fetch(host.url, {
+      method: "POST",
+      headers: {
+        Authorization: authorization,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2025-06-18",
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  try {
+    const initialized = await post({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "raw", version: "1" },
+      },
+    });
+    const sessionId = initialized.headers.get("mcp-session-id") ?? "";
+    await initialized.text();
+    await (
+      await post(
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        sessionId,
+      )
+    ).text();
+    const asked = await post(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "subagent_ask", arguments: { prompt: "Which API?" } },
+      },
+      sessionId,
+    );
+    assert.equal(asked.headers.get("content-type"), "text/event-stream");
+    answer("stable");
+    assert.match(await asked.text(), /stable/);
+  } finally {
+    await host.close();
+  }
+});
+
+test("MCP ask reports progress every 30 seconds while it waits", async (t) => {
+  let answer: (value: string) => void = () => undefined;
+  let asked = false;
+  const host = await createDelegationHost(
+    operations({
+      ask: () =>
+        new Promise<string>((resolve) => {
+          asked = true;
+          answer = resolve;
+        }),
+    }),
+  );
+  const connected = await client(host.url, host.grant("worker-run", []));
+  t.after(async () => {
+    await connected.close();
+    await host.close();
+  });
+  mock.timers.enable({ apis: ["setInterval"] });
+  t.after(() => mock.timers.reset());
+  const progress: number[] = [];
+  const call = connected.callTool(
+    { name: "subagent_ask", arguments: { prompt: "Which API?" } },
+    undefined,
+    {
+      onprogress: (value) => progress.push(value.progress),
+      resetTimeoutOnProgress: true,
+    },
+  );
+  while (!asked) await new Promise((resolve) => setImmediate(resolve));
+  mock.timers.tick(29999);
+  mock.timers.tick(1);
+  mock.timers.tick(30000);
+  while (progress.length < 2)
+    await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(progress, [1, 2]);
+  answer("stable");
+  assert.equal(content(await call), "stable");
 });

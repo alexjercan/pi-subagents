@@ -36,11 +36,11 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
     signal?: AbortSignal,
   ) => {
     if (!client) throw new Error("Subagent MCP connection is not running");
-    const result = await client.callTool(
-      { name, arguments: args },
-      undefined,
-      signal ? { signal } : undefined,
-    );
+    const result = await client.callTool({ name, arguments: args }, undefined, {
+      signal,
+      onprogress: () => undefined,
+      resetTimeoutOnProgress: true,
+    });
     const content = result.content as McpContent[];
     return {
       content: content.map((item) => ({

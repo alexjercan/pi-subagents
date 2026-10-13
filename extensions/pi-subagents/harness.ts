@@ -70,7 +70,7 @@ export type HarnessEvent =
 export interface HarnessResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
-  settled: boolean;
+  finished: boolean;
   finalText: string;
   stderr: string;
 }
@@ -92,34 +92,50 @@ export function spawnHarness(
     config.harness === "pi"
       ? createPiAdapter(request, config, options)
       : createClaudeAdapter(request, config, options);
-  let finalText = "";
-  let settled = false;
+  const reports: string[] = [];
+  let turnText = "";
+  let turnError: string | undefined;
+  let failure: Error | undefined;
+  let finished = false;
+  let turnActive = true;
   let stopRequested = false;
-  let idle = false;
   let processRun!: ReturnType<typeof spawnJsonlProcess>;
+  const fail = (error: unknown) => {
+    failure ??= error instanceof Error ? error : new Error(String(error));
+    processRun.stop();
+  };
   processRun = spawnJsonlProcess(adapter.process, (value) => {
     const normalized = adapter.normalize(value);
-    if (normalized.finalText !== undefined) finalText = normalized.finalText;
+    if (normalized.finalText !== undefined) {
+      turnText = normalized.finalText;
+      turnError = normalized.error;
+    } else if (normalized.error !== undefined) {
+      turnError = normalized.error;
+    }
     for (const event of normalized.events) onEvent(event);
-    if (normalized.settled) {
-      settled = true;
-      idle = true;
-      if (options.onTurnSettled?.() ?? true) processRun.end();
+    if (normalized.reply !== undefined)
+      processRun.send(normalized.reply).catch(fail);
+    if (!normalized.settled) return;
+    if (turnError !== undefined) {
+      fail(new Error(turnError));
+      return;
+    }
+    if (turnText) reports.push(turnText);
+    turnText = "";
+    turnActive = false;
+    if (options.onTurnSettled?.() ?? true) {
+      finished = true;
+      processRun.end();
     }
   });
-  let initialError: unknown;
   const initialized = processRun
-    .send(adapter.initial(request.prompt))
-    .catch((error) => {
-      initialError = error;
-      processRun.stop();
-    });
+    .send(adapter.prompt(request.prompt))
+    .catch(fail);
   return {
     pid: processRun.pid,
     send: (message) => {
-      const command = idle ? adapter.initial(message) : adapter.steer(message);
-      idle = false;
-      return processRun.send(command);
+      turnActive = true;
+      return processRun.send(adapter.prompt(message));
     },
     stop: () => {
       stopRequested = true;
@@ -127,10 +143,16 @@ export function spawnHarness(
     },
     completion: Promise.all([initialized, processRun.completion]).then(
       ([, result]) => {
-        if (initialError) throw initialError;
-        if (!settled && result.signal === null && !stopRequested)
-          throw new Error("Harness exited before reporting completion");
-        return { ...result, settled, finalText };
+        const withReports = (message: string) =>
+          new Error([message, ...reports].join("\n\n"));
+        if (failure) throw withReports(failure.message);
+        if (turnActive && result.signal === null && !stopRequested) {
+          const stderr = result.stderr.trim();
+          throw withReports(
+            `Harness exited with code ${result.exitCode} before reporting completion${stderr ? `\n${stderr}` : ""}`,
+          );
+        }
+        return { ...result, finished, finalText: reports.join("\n\n") };
       },
     ),
   };

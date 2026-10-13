@@ -5,9 +5,19 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream } from "node:stream/web";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type {
+  ServerNotification,
+  ServerRequest,
+} from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
+
+const PROGRESS_INTERVAL_MS = 30000;
 
 interface Grant {
   callerRunId: string;
@@ -84,13 +94,44 @@ async function body(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+async function withProgress<T>(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  work: () => Promise<T>,
+): Promise<T> {
+  const progressToken = extra._meta?.progressToken;
+  if (progressToken === undefined) return await work();
+  let progress = 0;
+  const timer = setInterval(() => {
+    progress += 1;
+    extra
+      .sendNotification({
+        method: "notifications/progress",
+        params: { progressToken, progress },
+      })
+      .catch(() => undefined);
+  }, PROGRESS_INTERVAL_MS);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 async function writeResponse(
   target: ServerResponse,
   source: Response,
 ): Promise<void> {
   target.statusCode = source.status;
   source.headers.forEach((value, name) => target.setHeader(name, value));
-  target.end(Buffer.from(await source.arrayBuffer()));
+  if (!source.body) {
+    target.end();
+    return;
+  }
+  target.flushHeaders();
+  await pipeline(
+    Readable.fromWeb(source.body as ReadableStream<Uint8Array>),
+    target,
+  );
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
@@ -167,9 +208,13 @@ export async function createDelegationHost(
           "Stop a directly owned child and its subtree and wait for its final state.",
         inputSchema: { id: z.string().min(1) },
       },
-      async ({ id }) => {
+      async ({ id }, extra) => {
         try {
-          return text(await operations.stop(grant.callerRunId, id));
+          return text(
+            await withProgress(extra, () =>
+              operations.stop(grant.callerRunId, id),
+            ),
+          );
         } catch (error) {
           return failure(error);
         }
@@ -198,7 +243,9 @@ export async function createDelegationHost(
       async ({ prompt }, extra) => {
         try {
           return text(
-            await operations.ask(grant.callerRunId, prompt, extra.signal),
+            await withProgress(extra, () =>
+              operations.ask(grant.callerRunId, prompt, extra.signal),
+            ),
           );
         } catch (error) {
           return failure(error);
@@ -274,7 +321,6 @@ export async function createDelegationHost(
       } as Grant;
       grant.transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
-        enableJsonResponse: true,
       });
       grant.server = createToolServer(grant);
       grant.ready = grant.server.connect(grant.transport);
