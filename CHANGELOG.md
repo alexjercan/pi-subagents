@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
+### Added
+
+- Add `subagent_create`, `subagent_message`, `subagent_wait`, `subagent_list`, `subagent_stop`, and `subagent_ask` as one tool contract defined in `tools.ts` and served to the root Pi session, Pi children over the HTTP bridge, and Claude children over SDK MCP on their own stdio.
+- Add `subagent_wait`, which blocks without a time limit until a directly owned run becomes idle, waiting, stopped, or failed and returns its notices with progress keepalives every 30 seconds.
+- Add the `idle` status: a settled turn with no live children, background tasks, or pending notices ends the process, keeps the session, and reports to the owner; `subagent_message` resumes the run with Claude `--resume` or the Pi session flags.
+- Add Pi child sessions under `~/.pi/agent/subagents/<encoded cwd>/` and the session path to every run snapshot.
+- Add `SubagentLogEntry` telemetry for create, resume, message, ask, answer, wait, stop, idle, and failed, appended to the root session through `pi.appendEntry` with usage, pid, and session path.
+- Add the `/subagent-list`, `/subagent-show`, `/subagent-create`, `/subagent-message`, and `/subagent-stop` commands; a missing id opens a selector, and user-created runs report to the root model like model-created runs.
+- Add the ask wording to the bundled delegating example profiles.
+
+### Changed
+
+- Launch Claude children with an SDK `initialize` control request, answer `mcp_message` frames through an in-memory MCP transport, and expose bare tool names with `CLAUDE_AGENT_SDK_MCP_NO_PREFIX`.
+- Keep Claude children alive while their background tasks run: a `result` settles the turn only when the live task set from `background_tasks_changed` is empty.
+- Give profiles without `delegates` no subagent tools at all; a leaf asks by ending its turn and its owner resumes it.
+- Report the last settled turn instead of joining every turn, and deliver each notice to the owner once.
+- Tell owners in tool descriptions and the delegation guidance that reports arrive on turn end or `subagent_wait` and that sleeping and polling are forbidden.
+- Mark every Pi child with `PI_SUBAGENTS_RUN_ID` so the root extension stays out of leaf children as well as bridged ones.
+
+### Removed
+
+- Remove the `subagent` tool, the `completed` and `cancelled` statuses, the `Agent exited before receiving child updates` failure, and the joined `reports[]` result.
+- Remove `--mcp-config`, `--allowedTools mcp__*`, Bearer grants, and the HTTP MCP path for Claude children.
+- Remove `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` and `--no-session` for Pi children.
+
 ## [0.1.11] - 2026-10-13
 
 ### Changed
@@ -119,7 +146,8 @@ All notable changes to this project are documented in this file.
 - Add asynchronous nested subagent control and direct-owner messaging.
 - Add the live subagent tree with usage and activity reporting.
 
-[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/alexjercan/pi-subagents/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alexjercan/pi-subagents/compare/v0.1.11...v0.2.0
 [0.1.11]: https://github.com/alexjercan/pi-subagents/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/alexjercan/pi-subagents/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/alexjercan/pi-subagents/compare/v0.1.8...v0.1.9

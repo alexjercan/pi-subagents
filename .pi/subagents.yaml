@@ -1,6 +1,6 @@
 agents:
-  scout:
-    description: Gather focused codebase context for implementation agents.
+  scout-haiku:
+    description: Use claude haiku to gather context for a feature request.
     harness: claude
     model: haiku
     thinking: medium
@@ -10,14 +10,13 @@ agents:
       - grep
       - find
     system: |
-      Gather focused information from the project for another agent.
-      Inspect only the area required by the task.
+      Inspect the repository and build a focused context for a feature request.
       Do not modify files.
-      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Report concrete paths, symbols, and line evidence.
       Keep the report concise and implementation-oriented.
 
   scout-luna:
-    description: Gather focused codebase context for implementation agents using Luna.
+    description: Use openai-codex luna to gather context for a feature request.
     harness: pi
     model: openai-codex/gpt-6-luna
     thinking: medium
@@ -27,14 +26,13 @@ agents:
       - grep
       - find
     system: |
-      Gather focused information from the project for another agent.
-      Inspect only the area required by the task.
+      Inspect the repository and build a focused context for a feature request.
       Do not modify files.
-      Return relevant paths, symbols, behavior, callers, tests, and concrete evidence.
+      Report concrete paths, symbols, and line evidence.
       Keep the report concise and implementation-oriented.
 
-  basic:
-    description: Handle focused, routine repository tasks.
+  scout-qwen:
+    description: Use qwen to gather context for a feature request.
     harness: pi
     model: qwen/Qwen3.5-9B
     thinking: medium
@@ -44,79 +42,16 @@ agents:
       - grep
       - find
     system: |
-      Handle focused, routine tasks.
-      Inspect only the required files.
+      Inspect the repository and build a focused context for a feature request.
       Do not modify files.
-      Return concise findings with concrete evidence.
+      Report concrete paths, symbols, and line evidence.
+      Keep the report concise and implementation-oriented.
 
-  research:
-    description: Research external topics and current information on the web.
-    harness: claude
-    model: haiku
-    thinking: medium
-    tools:
-      - web_search
-      - web_fetch
-    system: |
-      Research the requested topic on the web.
-      Use web search to find relevant primary and authoritative sources.
-      Fetch the useful sources and compare their claims.
-      Return a concise synthesis with source URLs, important details, and uncertainties.
-      Do not inspect or modify project files.
-
-  worker-claude:
-    description: Implement a task using Opus, focused scout context, and review.
-    harness: claude
-    model: opus
-    thinking: high
-    delegates:
-      - scout
-      - scout-luna
-      - research
-      - review
-    system: |
-      Implement the requested change.
-      Before implementation, call subagent_list to inspect the configured delegate kinds.
-      Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
-      Continue useful work while delegated tasks run.
-      Completed children will wake you with their final output.
-      Use subagent_message to steer a running child or answer its question.
-      Use subagent_ask when a decision must come from your owner.
-      Do not repeat broad project discovery yourself.
-      Inspect additional files only when implementation requires it.
-      Run the relevant checks.
-      Delegate verification when an appropriate configured kind is available.
-      Address actionable findings before reporting the completed change.
-
-  worker-sol:
-    description: Implement a task using Sol, focused scout context, and review.
-    harness: pi
-    model: openai-codex/gpt-6-sol
-    thinking: high
-    delegates:
-      - scout
-      - scout-luna
-      - research
-      - review
-    system: |
-      Implement the requested change.
-      Before implementation, call subagent_list to inspect the configured delegate kinds.
-      Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
-      Continue useful work while delegated tasks run.
-      Completed children will wake you with their final output.
-      Use subagent_message to steer a running child or answer its question.
-      Use subagent_ask when a decision must come from your owner.
-      Do not repeat broad project discovery yourself.
-      Inspect additional files only when implementation requires it.
-      Run the relevant checks.
-      Delegate verification when an appropriate configured kind is available.
-      Address actionable findings before reporting the completed change.
-
-  review:
-    description: Verify that a task is complete and that the implementation is correct.
+  review-sonnet:
+    description: Use claude sonnet to review the implementation of a feature request.
     harness: claude
     model: sonnet
-    thinking: medium
+    thinking: high
     tools:
       - read
       - ls
@@ -124,8 +59,152 @@ agents:
       - find
       - bash
     system: |
-      Review the implementation against the requested task.
-      Check correctness, regressions, tests, failure behavior, and maintainability.
-      Run relevant checks when needed.
-      Report findings with concrete paths and evidence.
-      Do not modify the implementation.
+      Review the implementation of a feature request.
+      Do not modify files.
+      Report concrete paths, symbols, and line evidence.
+      Keep the report concise and implementation-oriented.
+
+  review-sol:
+    description: Use openai-codex sol to review the implementation of a feature request.
+    harness: pi
+    model: openai-codex/gpt-6.1-sol
+    thinking: high
+    tools:
+      - read
+      - ls
+      - grep
+      - find
+      - bash
+    system: |
+      Review the implementation of a feature request.
+      Do not modify files.
+      Report concrete paths, symbols, and line evidence.
+      Keep the report concise and implementation-oriented.
+
+  sub-worker-luna:
+    description: Use openai-codex luna to implement a small feature request.
+    harness: pi
+    model: openai-codex/gpt-6-luna
+    thinking: xhigh
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+    system: |
+      Implement only a small approved feature request.
+
+  sub-worker-sonnet:
+    description: Use claude sonnet to implement a small feature request.
+    harness: claude
+    model: sonnet
+    thinking: high
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+    system: |
+      Implement only a small approved feature request.
+
+  worker-opus:
+    description: Use claude opus to implement a feature request and verify the result.
+    harness: claude
+    model: opus
+    thinking: high
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+      - sub-worker-luna
+      - sub-worker-sonnet
+      - review-sonnet
+      - review-sol
+    system: |
+        Implement a feature request and verify the result.
+
+  worker-sol:
+    description: Use openai-codex sol to implement a feature request and verify the result.
+    harness: pi
+    model: openai-codex/gpt-6.1-sol
+    thinking: high
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+      - sub-worker-luna
+      - sub-worker-sonnet
+      - review-sonnet
+      - review-sol
+    system: |
+        Implement a feature request and verify the result.
+
+  basic-worker-opus:
+    description: Use claude opus to implement a small feature request and verify the result.
+    harness: claude
+    model: opus
+    thinking: medium
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+      - sub-worker-luna
+      - sub-worker-sonnet
+      - review-sonnet
+      - review-sol
+    system: |
+      Implement a small feature request and verify the result.
+
+  basic-worker-sol:
+    description: Use openai-codex sol to implement a small feature request and verify the result.
+    harness: pi
+    model: openai-codex/gpt-6.1-sol
+    thinking: medium
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+      - sub-worker-luna
+      - sub-worker-sonnet
+      - review-sonnet
+      - review-sol
+    system: |
+      Implement a small feature request and verify the result.
+
+  worker-fable:
+    description: Use claude fable to implement a feature request and verify the result.
+    harness: claude
+    model: fable
+    thinking: high
+    delegates:
+      - scout-haiku
+      - scout-luna
+      - scout-qwen
+      - sub-worker-luna
+      - sub-worker-sonnet
+      - review-sonnet
+      - review-sol
+    system: |
+        Implement a feature request and verify the result.
+
+  researcher-sonnet:
+    description: Use claude sonnet to research a feature request and provide a report.
+    harness: claude
+    model: sonnet
+    thinking: medium
+    tools:
+      - web_search
+      - web_fetch
+    system: |
+      Research a feature request and provide a report.
+      Use web search and web fetch to gather information.
+
+  researcher-opus:
+    description: Use claude opus to research a feature request and provide a report.
+    harness: claude
+    model: opus
+    thinking: medium
+    tools:
+      - web_search
+      - web_fetch
+    system: |
+      Research a feature request and provide a report.
+      Use web search and web fetch to gather information.

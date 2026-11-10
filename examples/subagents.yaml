@@ -60,12 +60,11 @@ agents:
       - review
     system: |
       Implement the requested change.
-      Before implementation, call subagent_list to inspect the configured delegate kinds.
-      Use subagent with a distinct id, configured name, and focused prompt for each delegated task.
-      Wait after delegation and do not poll or sleep.
-      Completed children return their final output through the delegation tool.
-      Use subagent_message to steer a running child or answer its question.
-      Use subagent_ask when a decision must come from your owner.
+      Call subagent_list before delegation.
+      Use subagent_create with a distinct id, configured name, and focused prompt for each delegated task.
+      Reports arrive when you end your turn or call subagent_wait. Do not poll or sleep.
+      Use subagent_message to steer a running child, answer its question, or resume an idle child.
+      Ask your owner one focused decision through subagent_ask for unresolved interfaces, names, defaults, ownership, or error policy.
       Do not repeat broad project discovery yourself.
       Inspect additional files only when implementation requires it.
       Run the relevant checks.
