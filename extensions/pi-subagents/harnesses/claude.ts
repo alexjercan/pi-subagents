@@ -30,6 +30,7 @@ const SERVER_NAME = "pi_subagents";
 
 export interface ClaudeState {
   toolNames: Map<string, string>;
+  backgroundTasks: Set<string>;
   control?: ControlChannel;
 }
 
@@ -42,7 +43,17 @@ export interface ControlChannel {
 }
 
 export function createClaudeState(): ClaudeState {
-  return { toolNames: new Map() };
+  return { toolNames: new Map(), backgroundTasks: new Set() };
+}
+
+function backgroundTaskIds(event: Record<string, unknown>): Set<string> {
+  const tasks = Array.isArray(event.tasks) ? event.tasks : [];
+  const ids = new Set<string>();
+  for (const value of tasks) {
+    const id = string(record(value)?.task_id);
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
 }
 
 export function claudeSessionPath(cwd: string, runId: string): string {
@@ -304,6 +315,12 @@ export function normalizeClaudeRecord(
     return { events: [] };
   }
 
+  if (type === "system") {
+    if (event.subtype === "background_tasks_changed")
+      state.backgroundTasks = backgroundTaskIds(event);
+    return { events: [] };
+  }
+
   if (type === "result") {
     const resultUsage = record(event.usage);
     const costUsd = number(event.total_cost_usd);
@@ -319,7 +336,7 @@ export function normalizeClaudeRecord(
         : [],
       finalText,
       error: resultError(event, finalText),
-      settled: true,
+      settled: state.backgroundTasks.size === 0,
     };
   }
 

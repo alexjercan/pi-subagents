@@ -11,7 +11,10 @@ import {
   type HarnessEvent,
   type HarnessRequest,
 } from "../extensions/pi-subagents/harness.ts";
-import { normalizeClaudeRecord } from "../extensions/pi-subagents/harnesses/claude.ts";
+import {
+  createClaudeState,
+  normalizeClaudeRecord,
+} from "../extensions/pi-subagents/harnesses/claude.ts";
 import { spawnJsonlProcess } from "../extensions/pi-subagents/process.ts";
 import {
   createToolServer,
@@ -617,6 +620,69 @@ function alive(pid: number): boolean {
     return false;
   }
 }
+
+test("A Claude result settles only while no background task is live", () => {
+  const state = createClaudeState();
+  normalizeClaudeRecord(
+    {
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "build" }],
+    },
+    state,
+  );
+  assert.equal(
+    normalizeClaudeRecord({ type: "result", result: "started" }, state).settled,
+    false,
+  );
+  normalizeClaudeRecord(
+    { type: "system", subtype: "background_tasks_changed", tasks: [] },
+    state,
+  );
+  assert.equal(
+    normalizeClaudeRecord({ type: "result", result: "finished" }, state)
+      .settled,
+    true,
+  );
+});
+
+test("A Claude turn with a live background task settles on the result that follows the task", async () => {
+  let turns = 0;
+  const executables = await installExecutables({
+    claude: claudeFixture(`
+onPrompt(async () => {
+  await write({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "build" }] });
+  await write({ type: "system", subtype: "task_started", task_id: "build" });
+  await result("started the build");
+  await sleep(50);
+  await write({ type: "system", subtype: "task_notification", task_id: "build" });
+  await write({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  await write({ type: "system", subtype: "init" });
+  await result("build finished");
+});
+`),
+  });
+  try {
+    const run = spawnHarness(
+      request("build"),
+      claudeConfig,
+      {
+        system: "Build.",
+        onTurnSettled: () => {
+          turns += 1;
+          return true;
+        },
+      },
+      () => undefined,
+    );
+    const result = await run.completion;
+    assert.equal(turns, 1);
+    assert.equal(result.report, "build finished");
+    assert.equal(result.exitCode, 0);
+  } finally {
+    await executables.dispose();
+  }
+});
 
 test("Claude turn errors carry the reported errors", () => {
   assert.deepEqual(
