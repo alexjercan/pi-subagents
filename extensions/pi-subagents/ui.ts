@@ -83,9 +83,13 @@ function formatTool(name: string, value: unknown): string {
       `subagent_ask ${JSON.stringify(string(input.prompt) ?? "")}`,
     );
   }
-  if (normalized.endsWith("subagent")) {
+  if (normalized.endsWith("subagent_wait")) {
+    const ids = Array.isArray(input.ids) ? input.ids.map(String) : [];
+    return compact(`subagent_wait ${ids.join(",") || "any"}`);
+  }
+  if (normalized.endsWith("subagent_create")) {
     return compact(
-      `subagent ${string(input.id) ?? "child"} ${string(input.name) ?? "agent"} ${JSON.stringify(string(input.prompt) ?? "")}`,
+      `subagent_create ${string(input.id) ?? "child"} ${string(input.name) ?? "agent"} ${JSON.stringify(string(input.prompt) ?? "")}`,
     );
   }
   const serialized = JSON.stringify(value);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import {
   loadAgentProfiles,
   type AgentProfile,
@@ -13,7 +14,12 @@ import {
   type HarnessUsage,
   type PiThinkingLevel,
 } from "./harness.ts";
-import { createDelegationHost, type DelegationHost } from "./mcp.ts";
+import {
+  createDelegationHost,
+  type DelegationGrant,
+  type DelegationHost,
+} from "./mcp.ts";
+import { DELEGATION_GUIDANCE } from "./tools.ts";
 
 export type AgentRunStatus =
   | "running"
@@ -63,7 +69,7 @@ export interface OwnedAgentRun {
   name: string;
   status: AgentRunStatus;
   question?: string;
-  finalText?: string;
+  report?: string;
   error?: string;
 }
 
@@ -80,12 +86,17 @@ export interface StartAgentRequest {
 }
 
 export interface AgentRuntime {
-  start(request: StartAgentRequest): Promise<AgentRunSnapshot>;
+  create(request: StartAgentRequest): Promise<AgentRunSnapshot>;
   message(
     ownerRunId: string | undefined,
     id: string,
     message: string,
   ): Promise<void>;
+  wait(
+    ownerRunId: string | undefined,
+    ids: string[] | undefined,
+    signal: AbortSignal,
+  ): Promise<string[]>;
   stop(ownerRunId: string | undefined, id: string): Promise<OwnedAgentRun>;
   inventory(ownerRunId?: string): Promise<AgentInventory>;
   list(): AgentRunSnapshot[];
@@ -94,6 +105,7 @@ export interface AgentRuntime {
 }
 
 export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
+  sessionsDir: string;
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
   onRootMessage?: (message: string) => void | Promise<void>;
   onRootQuestion?: (id: string, prompt: string) => void | Promise<void>;
@@ -101,6 +113,17 @@ export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
 
 interface PendingQuestion {
   resolve(answer: string): void;
+  reject(error: Error): void;
+}
+
+interface Notice {
+  childRunId: string;
+  text: string;
+}
+
+interface Waiter {
+  childRunIds: Set<string>;
+  resolve(notices: string[]): void;
   reject(error: Error): void;
 }
 
@@ -144,12 +167,13 @@ export async function createAgentRuntime(
 ): Promise<AgentRuntime> {
   const snapshots = new Map<string, AgentRunSnapshot>();
   const active = new Map<string, HarnessRun>();
-  const authorizations = new Map<string, string>();
+  const grants = new Map<string, DelegationGrant>();
   const questions = new Map<string, PendingQuestion>();
   const stateWaiters = new Map<string, Set<() => void>>();
   const stopping = new Set<string>();
   const idleOwners = new Set<string>();
-  const pendingNotifications = new Map<string, string[]>();
+  const pendingNotifications = new Map<string, Notice[]>();
+  const waiters = new Map<string | undefined, Set<Waiter>>();
   const delivering = new Set<string>();
   const deliveryFailures = new Map<string, string>();
   let closing = false;
@@ -182,41 +206,73 @@ export async function createAgentRuntime(
   };
   const deliver = (ownerRunId: string) => {
     const run = active.get(ownerRunId);
-    const messages = pendingNotifications.get(ownerRunId);
-    if (!run || !messages?.length || stopping.has(ownerRunId) || closing)
-      return;
+    const notices = pendingNotifications.get(ownerRunId);
+    if (!run || !notices?.length || stopping.has(ownerRunId) || closing) return;
     pendingNotifications.delete(ownerRunId);
     idleOwners.delete(ownerRunId);
     delivering.add(ownerRunId);
-    void run.send(messages.join("\n\n")).catch((error: unknown) => {
-      if (stopping.has(ownerRunId) || closing || !active.has(ownerRunId))
-        return;
-      deliveryFailures.set(
-        ownerRunId,
-        `Could not deliver child update: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      stopTree(ownerRunId);
-    });
+    void run
+      .send(notices.map((notice) => notice.text).join("\n\n"))
+      .catch((error: unknown) => {
+        if (stopping.has(ownerRunId) || closing || !active.has(ownerRunId))
+          return;
+        deliveryFailures.set(
+          ownerRunId,
+          `Could not deliver child update: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        stopTree(ownerRunId);
+      });
   };
-  const notifyOwner = (ownerRunId: string, message: string) => {
+  const wake = (ownerRunId: string | undefined, notice: Notice): boolean => {
+    const pending = waiters.get(ownerRunId);
+    if (!pending) return false;
+    for (const waiter of pending) {
+      if (!waiter.childRunIds.has(notice.childRunId)) continue;
+      pending.delete(waiter);
+      if (pending.size === 0) waiters.delete(ownerRunId);
+      const remaining = pendingNotifications.get(ownerRunId ?? "") ?? [];
+      const taken = remaining.filter((candidate) =>
+        waiter.childRunIds.has(candidate.childRunId),
+      );
+      const kept = remaining.filter(
+        (candidate) => !waiter.childRunIds.has(candidate.childRunId),
+      );
+      if (ownerRunId !== undefined) {
+        if (kept.length > 0) pendingNotifications.set(ownerRunId, kept);
+        else pendingNotifications.delete(ownerRunId);
+      }
+      waiter.resolve([...taken, notice].map((candidate) => candidate.text));
+      return true;
+    }
+    return false;
+  };
+  const notifyRoot = (notice: Notice) => {
+    if (closing || wake(undefined, notice)) return;
+    void (async () => options.onRootMessage?.(notice.text))().catch(
+      () => undefined,
+    );
+  };
+  const notifyOwner = (ownerRunId: string, notice: Notice) => {
     if (!active.has(ownerRunId) || stopping.has(ownerRunId) || closing) return;
-    const messages = pendingNotifications.get(ownerRunId) ?? [];
-    messages.push(message);
-    pendingNotifications.set(ownerRunId, messages);
+    if (wake(ownerRunId, notice)) return;
+    const notices = pendingNotifications.get(ownerRunId) ?? [];
+    notices.push(notice);
+    pendingNotifications.set(ownerRunId, notices);
     if (idleOwners.has(ownerRunId)) deliver(ownerRunId);
   };
   const turnSettled = (runId: string): boolean => {
     delivering.delete(runId);
     idleOwners.add(runId);
-    const messages = pendingNotifications.get(runId) ?? [];
+    const notices = pendingNotifications.get(runId) ?? [];
     for (const snapshot of snapshots.values()) {
       if (snapshot.parentRunId !== runId || snapshot.question === undefined)
         continue;
-      const notice = questionNotice(snapshot.id, snapshot.question);
-      if (!messages.includes(notice)) messages.push(notice);
+      const text = questionNotice(snapshot.id, snapshot.question);
+      if (!notices.some((notice) => notice.text === text))
+        notices.push({ childRunId: snapshot.runId, text });
     }
-    if (messages.length > 0) {
-      pendingNotifications.set(runId, messages);
+    if (notices.length > 0) {
+      pendingNotifications.set(runId, notices);
       deliver(runId);
       return false;
     }
@@ -245,9 +301,7 @@ export async function createAgentRuntime(
     name: snapshot.agent,
     status: snapshot.status,
     ...(snapshot.question === undefined ? {} : { question: snapshot.question }),
-    ...(snapshot.result?.finalText
-      ? { finalText: snapshot.result.finalText }
-      : {}),
+    ...(snapshot.result?.report ? { report: snapshot.result.report } : {}),
     ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
   });
   const inventory = async (ownerRunId?: string): Promise<AgentInventory> => ({
@@ -283,6 +337,61 @@ export async function createAgentRuntime(
         `Subagent ${id} ${snapshot.status} before it was cancelled`,
       );
     return ownedRun(snapshot);
+  };
+
+  const wait = async (
+    ownerRunId: string | undefined,
+    ids: string[] | undefined,
+    signal: AbortSignal,
+  ): Promise<string[]> => {
+    const children = [...snapshots.values()].filter(
+      (snapshot) => snapshot.parentRunId === ownerRunId,
+    );
+    const targets =
+      ids === undefined
+        ? children
+        : ids.map((id) => {
+            const found = children.find((snapshot) => snapshot.id === id);
+            if (!found)
+              throw new Error(`Unknown directly owned subagent ${id}`);
+            return found;
+          });
+    if (targets.length === 0) throw new Error("No directly owned subagents");
+    const childRunIds = new Set(targets.map((snapshot) => snapshot.runId));
+    const pending = pendingNotifications.get(ownerRunId ?? "") ?? [];
+    const ready = pending.filter((notice) =>
+      childRunIds.has(notice.childRunId),
+    );
+    if (ready.length > 0 && ownerRunId !== undefined) {
+      const kept = pending.filter(
+        (notice) => !childRunIds.has(notice.childRunId),
+      );
+      if (kept.length > 0) pendingNotifications.set(ownerRunId, kept);
+      else pendingNotifications.delete(ownerRunId);
+      return ready.map((notice) => notice.text);
+    }
+    if (!targets.some((snapshot) => snapshot.status === "running"))
+      throw new Error(
+        `No subagent to wait for: ${targets
+          .map((snapshot) => `${snapshot.id} is ${snapshot.status}`)
+          .join(", ")}`,
+      );
+    if (signal.aborted) throw new Error("Wait was cancelled");
+    return await new Promise<string[]>((resolve, reject) => {
+      const waiter: Waiter = { childRunIds, resolve, reject };
+      const set = waiters.get(ownerRunId) ?? new Set();
+      set.add(waiter);
+      waiters.set(ownerRunId, set);
+      signal.addEventListener(
+        "abort",
+        () => {
+          set.delete(waiter);
+          if (set.size === 0) waiters.delete(ownerRunId);
+          reject(new Error("Wait was cancelled"));
+        },
+        { once: true },
+      );
+    });
   };
 
   const message = async (
@@ -343,7 +452,10 @@ export async function createAgentRuntime(
     }
     signal.addEventListener("abort", abort, { once: true });
     if (snapshot.parentRunId)
-      notifyOwner(snapshot.parentRunId, questionNotice(snapshot.id, prompt));
+      notifyOwner(snapshot.parentRunId, {
+        childRunId: runId,
+        text: questionNotice(snapshot.id, prompt),
+      });
     if (!snapshot.parentRunId) {
       const onRootQuestion = options.onRootQuestion;
       if (!onRootQuestion) {
@@ -419,34 +531,24 @@ export async function createAgentRuntime(
       for (const candidate of snapshots.values()) {
         if (candidate.parentRunId === snapshot.runId) stopTree(candidate.runId);
       }
-      const authorization = authorizations.get(snapshot.runId);
-      if (authorization) host.revoke(authorization);
-      authorizations.delete(snapshot.runId);
+      grants.get(snapshot.runId)?.revoke();
+      grants.delete(snapshot.runId);
       signalState(snapshot.runId);
       emit();
     }
     const output = snapshot.error
-      ? `${snapshot.error}${snapshot.result?.finalText ? `\n${snapshot.result.finalText}` : ""}`
-      : snapshot.result?.finalText || "(no output)";
-    if (!closing && snapshot.parentRunId && active.has(snapshot.parentRunId)) {
-      notifyOwner(
-        snapshot.parentRunId,
-        `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
-      );
-    }
-    if (!closing && !snapshot.parentRunId) {
-      try {
-        await options.onRootMessage?.(
-          `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
-        );
-      } catch (error) {
-        snapshot.error = `Could not wake owner: ${error instanceof Error ? error.message : String(error)}`;
-        emit();
-      }
-    }
+      ? `${snapshot.error}${snapshot.result?.report ? `\n${snapshot.result.report}` : ""}`
+      : snapshot.result?.report || "(no output)";
+    const notice: Notice = {
+      childRunId: snapshot.runId,
+      text: `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+    };
+    if (closing) return;
+    if (snapshot.parentRunId) notifyOwner(snapshot.parentRunId, notice);
+    else notifyRoot(notice);
   };
 
-  const start = async (
+  const create = async (
     request: StartAgentRequest,
   ): Promise<AgentRunSnapshot> => {
     if (!request.id) throw new Error("Subagent id must be a non-empty string");
@@ -470,16 +572,26 @@ export async function createAgentRuntime(
     }
 
     const runId = randomUUID();
-    const authorization = host.grant(runId, profile.delegates);
+    await mkdir(options.sessionsDir, { recursive: true });
+    const delegating = profile.delegates.length > 0;
+    const grant = delegating ? host.grant(runId, profile.delegates) : undefined;
     let harnessRun: HarnessRun;
     try {
       harnessRun = spawnHarness(
-        { cwd: options.cwd, prompt: request.prompt, sessionId: runId },
+        {
+          cwd: options.cwd,
+          prompt: request.prompt,
+          runId,
+          resume: false,
+          sessionsDir: options.sessionsDir,
+        },
         profile.config,
         {
-          system: profile.system,
+          system: delegating
+            ? `${profile.system}\n\n${DELEGATION_GUIDANCE}`
+            : profile.system,
           tools: profile.tools,
-          delegation: { url: host.url, authorization },
+          ...(grant ? { delegation: grant } : {}),
           onTurnSettled: () => turnSettled(runId),
         },
         (event) => {
@@ -491,7 +603,7 @@ export async function createAgentRuntime(
         },
       );
     } catch (error) {
-      host.revoke(authorization);
+      grant?.revoke();
       throw error;
     }
 
@@ -516,7 +628,7 @@ export async function createAgentRuntime(
     };
     snapshots.set(runId, snapshot);
     active.set(runId, harnessRun);
-    authorizations.set(runId, authorization);
+    if (grant) grants.set(runId, grant);
     emit();
     void settle(snapshot, harnessRun);
     return {
@@ -527,8 +639,8 @@ export async function createAgentRuntime(
   };
 
   host = await createDelegationHost({
-    async start(callerRunId, id, name, prompt) {
-      await start({ id, name, prompt, parentRunId: callerRunId });
+    async create(callerRunId, id, name, prompt) {
+      await create({ id, name, prompt, parentRunId: callerRunId });
       const snapshot = child(callerRunId, id);
       if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
       return ownedRun(snapshot);
@@ -539,14 +651,16 @@ export async function createAgentRuntime(
       if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
       return ownedRun(snapshot);
     },
+    wait,
     stop,
     list: (callerRunId) => inventory(callerRunId),
     ask,
   });
 
   return {
-    start,
+    create,
     message,
+    wait,
     stop,
     inventory,
     list,

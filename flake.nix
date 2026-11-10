@@ -77,12 +77,15 @@
           export default function smoke(pi) {
             pi.on("session_start", async () => {
               const host = await createDelegationHost({
-                start: async () => ({}),
-                message: async () => undefined,
+                create: async () => ({}),
+                message: async () => ({}),
+                wait: async () => [],
+                stop: async () => ({}),
                 list: async () => ({ kinds: [], runs: [] }),
                 ask: async () => "answer",
               });
-              const authorization = host.grant("smoke", []);
+              const grant = host.grant("smoke", []);
+              const { authorization } = grant.http();
               const client = new Client({ name: "smoke", version: "1" });
               await client.connect(new StreamableHTTPClientTransport(
                 new URL(host.url),
@@ -91,7 +94,7 @@
               await client.callTool({ name: "subagent_list", arguments: {} });
               await Promise.allSettled([
                 client.close(),
-                Promise.resolve(host.revoke(authorization)),
+                Promise.resolve(grant.revoke()),
               ]);
               await host.close();
             });

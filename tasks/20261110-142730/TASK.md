@@ -4,7 +4,6 @@
 - PRIORITY: 1
 - TAGS: feature,runtime,mcp,ui
 
-
 Source: review of 2026-10-13..11-10 sessions (nova-protocol, slop-dudes,
 content-machine2, the-specimen-bevy; 2388 Claude children, $4951). Runtime is
 reliable since v0.1.11, but children spend 17-22% of wall time in `sleep`
@@ -25,7 +24,7 @@ Approved 2026-11-10. No backward compatibility: old paths are deleted.
   surface sees the same bare names and schemas).
 - Claude child: `initialize` control request with
   `sdkMcpServers: ["pi_subagents"]`, `sdkMcpServerConfigs.pi_subagents =
-  { timeout: 2147483647, alwaysLoad: true }`; `mcp_message` frames answered
+{ timeout: 2147483647, alwaysLoad: true }`; `mcp_message` frames answered
   through the grant's `McpServer` over `InMemoryTransport`; `--strict-mcp-config`
   kept; `--mcp-config`, `--allowedTools mcp__*`, Bearer grants for Claude die.
   Verified on Claude Code 2.1.316: a tool call held 100 s returned with
@@ -62,7 +61,7 @@ Approved 2026-11-10. No backward compatibility: old paths are deleted.
   wait, stop, idle, failed, with usage, pid, and session path, appended to the
   root session through `pi.appendEntry`.
 - Commands: `/subagent-list`, `/subagent-show <id>`, `/subagent-create <name>
-  <id> <prompt>`, `/subagent-message <id> <text>`, `/subagent-stop <id>`;
+<id> <prompt>`, `/subagent-message <id> <text>`, `/subagent-stop <id>`;
   missing id opens `ctx.ui.select`. User-created runs are owned by the root
   and report to the root model like model-created runs.
 - Bundled example profiles get the slop-dudes ask wording.

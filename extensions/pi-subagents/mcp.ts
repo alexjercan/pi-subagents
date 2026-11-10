@@ -2,76 +2,35 @@ import { randomBytes, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
-  type Server,
   type ServerResponse,
 } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream } from "node:stream/web";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type {
-  ServerNotification,
-  ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
-import * as z from "zod/v4";
+import {
+  createToolServer,
+  type DelegationOperations,
+  type Grant,
+} from "./tools.ts";
 
-const PROGRESS_INTERVAL_MS = 30000;
-
-interface Grant {
-  callerRunId: string;
-  agents: Set<string>;
+interface HttpGrant {
   server: McpServer;
   transport: WebStandardStreamableHTTPServerTransport;
   ready: Promise<void>;
 }
 
-export interface DelegationOperations {
-  start(
-    callerRunId: string,
-    id: string,
-    name: string,
-    prompt: string,
-  ): Promise<unknown>;
-  message(callerRunId: string, id: string, message: string): Promise<unknown>;
-  stop(callerRunId: string, id: string): Promise<unknown>;
-  list(callerRunId: string): Promise<unknown>;
-  ask(
-    callerRunId: string,
-    prompt: string,
-    signal: AbortSignal,
-  ): Promise<string>;
+export interface DelegationGrant {
+  http(): { url: string; authorization: string };
+  server(): McpServer;
+  revoke(): void;
 }
 
 export interface DelegationHost {
   url: string;
-  grant(callerRunId: string, agents: string[]): string;
-  revoke(authorization: string): void;
+  grant(callerRunId: string, agents: string[]): DelegationGrant;
   close(): Promise<void>;
-}
-
-function text(value: unknown) {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: typeof value === "string" ? value : JSON.stringify(value),
-      },
-    ],
-  };
-}
-
-function failure(error: unknown) {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: error instanceof Error ? error.message : String(error),
-      },
-    ],
-    isError: true,
-  };
 }
 
 function headers(request: IncomingMessage): Headers {
@@ -92,29 +51,6 @@ async function body(request: IncomingMessage): Promise<Buffer> {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
-}
-
-async function withProgress<T>(
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
-  work: () => Promise<T>,
-): Promise<T> {
-  const progressToken = extra._meta?.progressToken;
-  if (progressToken === undefined) return await work();
-  let progress = 0;
-  const timer = setInterval(() => {
-    progress += 1;
-    extra
-      .sendNotification({
-        method: "notifications/progress",
-        params: { progressToken, progress },
-      })
-      .catch(() => undefined);
-  }, PROGRESS_INTERVAL_MS);
-  try {
-    return await work();
-  } finally {
-    clearInterval(timer);
-  }
 }
 
 async function writeResponse(
@@ -156,104 +92,8 @@ function writeError(response: ServerResponse, error: unknown): void {
 export async function createDelegationHost(
   operations: DelegationOperations,
 ): Promise<DelegationHost> {
-  const grants = new Map<string, Grant>();
-
-  const createToolServer = (grant: Grant) => {
-    const server = new McpServer({ name: "pi-subagents", version: "0.1.0" });
-    server.registerTool(
-      "subagent",
-      {
-        description:
-          "Start a configured direct child and return its current state. Child completion and questions are sent to this owner automatically.",
-        inputSchema: {
-          id: z.string().min(1),
-          name: z.string().min(1),
-          prompt: z.string().min(1),
-        },
-      },
-      async ({ id, name, prompt }) => {
-        if (!grant.agents.has(name))
-          return failure(`Agent ${name} is not an allowed delegate`);
-        try {
-          return text(
-            await operations.start(grant.callerRunId, id, name, prompt),
-          );
-        } catch (error) {
-          return failure(error);
-        }
-      },
-    );
-    server.registerTool(
-      "subagent_message",
-      {
-        description:
-          "Send a message to a directly owned child and return its current state. Child completion and questions are sent to this owner automatically.",
-        inputSchema: {
-          id: z.string().min(1),
-          message: z.string().min(1),
-        },
-      },
-      async ({ id, message }) => {
-        try {
-          return text(await operations.message(grant.callerRunId, id, message));
-        } catch (error) {
-          return failure(error);
-        }
-      },
-    );
-    server.registerTool(
-      "subagent_stop",
-      {
-        description:
-          "Stop a directly owned child and its subtree and wait for its final state.",
-        inputSchema: { id: z.string().min(1) },
-      },
-      async ({ id }, extra) => {
-        try {
-          return text(
-            await withProgress(extra, () =>
-              operations.stop(grant.callerRunId, id),
-            ),
-          );
-        } catch (error) {
-          return failure(error);
-        }
-      },
-    );
-    server.registerTool(
-      "subagent_list",
-      {
-        description: "List allowed agent kinds and directly owned runs.",
-        inputSchema: {},
-      },
-      async () => {
-        try {
-          return text(await operations.list(grant.callerRunId));
-        } catch (error) {
-          return failure(error);
-        }
-      },
-    );
-    server.registerTool(
-      "subagent_ask",
-      {
-        description: "Ask the direct owner a question and wait for its answer.",
-        inputSchema: { prompt: z.string().min(1) },
-      },
-      async ({ prompt }, extra) => {
-        try {
-          return text(
-            await withProgress(extra, () =>
-              operations.ask(grant.callerRunId, prompt, extra.signal),
-            ),
-          );
-        } catch (error) {
-          return failure(error);
-        }
-      },
-    );
-    return server;
-  };
+  const httpGrants = new Map<string, HttpGrant>();
+  const servers = new Set<McpServer>();
 
   const handle = async (
     request: IncomingMessage,
@@ -265,7 +105,7 @@ export async function createDelegationHost(
       return;
     }
     const authorization = request.headers.authorization ?? "";
-    const grant = grants.get(authorization);
+    const grant = httpGrants.get(authorization);
     if (!grant) {
       response.statusCode = 401;
       response.setHeader("content-type", "application/json");
@@ -310,32 +150,53 @@ export async function createDelegationHost(
     httpServer.close();
     throw new Error("MCP server did not bind to a TCP port");
   }
+  const url = `http://127.0.0.1:${address.port}/mcp`;
 
   return {
-    url: `http://127.0.0.1:${address.port}/mcp`,
+    url,
     grant(callerRunId, agents) {
-      const authorization = `Bearer ${randomBytes(32).toString("hex")}`;
-      const grant = {
-        callerRunId,
-        agents: new Set(agents),
-      } as Grant;
-      grant.transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: randomUUID,
-      });
-      grant.server = createToolServer(grant);
-      grant.ready = grant.server.connect(grant.transport);
-      grants.set(authorization, grant);
-      return authorization;
-    },
-    revoke(authorization) {
-      const grant = grants.get(authorization);
-      grants.delete(authorization);
-      if (grant) void grant.server.close();
+      const grant: Grant = { callerRunId, agents: new Set(agents) };
+      const owned = new Set<McpServer>();
+      const authorizations = new Set<string>();
+      const create = () => {
+        const server = createToolServer(operations, grant);
+        owned.add(server);
+        servers.add(server);
+        return server;
+      };
+      return {
+        http() {
+          const authorization = `Bearer ${randomBytes(32).toString("hex")}`;
+          const server = create();
+          const transport = new WebStandardStreamableHTTPServerTransport({
+            sessionIdGenerator: randomUUID,
+          });
+          httpGrants.set(authorization, {
+            server,
+            transport,
+            ready: server.connect(transport),
+          });
+          authorizations.add(authorization);
+          return { url, authorization };
+        },
+        server: create,
+        revoke() {
+          for (const authorization of authorizations)
+            httpGrants.delete(authorization);
+          authorizations.clear();
+          for (const server of owned) {
+            servers.delete(server);
+            void server.close();
+          }
+          owned.clear();
+        },
+      };
     },
     async close() {
-      const servers = [...grants.values()].map((grant) => grant.server);
-      grants.clear();
-      await Promise.allSettled(servers.map((server) => server.close()));
+      const open = [...servers];
+      httpGrants.clear();
+      servers.clear();
+      await Promise.allSettled(open.map((server) => server.close()));
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => {
           if (error) reject(error);

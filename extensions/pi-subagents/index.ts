@@ -1,12 +1,15 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
 import {
   createAgentRuntime,
   type AgentInventory,
   type AgentRunSnapshot,
   type AgentRuntime,
 } from "./runtime.ts";
+import { registerPiTools, type ToolRenderers } from "./pi-tools.ts";
+import { OWNER_TOOLS, type ToolResult } from "./tools.ts";
 import { activeAgentTree, renderAgentTree, type AgentTreeTheme } from "./ui.ts";
 
 interface SubagentDetails {
@@ -27,22 +30,98 @@ function colors(theme: Theme): AgentTreeTheme {
   };
 }
 
-function errorResult(error: unknown): {
-  content: Array<{ type: "text"; text: string }>;
-  details: SubagentDetails;
-  isError: true;
-} {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: error instanceof Error ? error.message : String(error),
-      },
-    ],
-    details: { error: true },
-    isError: true,
-  };
+export function sessionsDirectory(home: string, cwd: string): string {
+  return join(
+    home,
+    ".pi",
+    "agent",
+    "subagents",
+    cwd.replace(/[^A-Za-z0-9._-]/g, "-"),
+  );
 }
+
+function text(value: string, details?: SubagentDetails): ToolResult {
+  return { content: [{ type: "text", text: value }], details };
+}
+
+function required(args: Record<string, unknown>, name: string): string {
+  const value = args[name];
+  if (typeof value !== "string" || value.length === 0)
+    throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function renderMuted(
+  result: {
+    content: Array<{ type: string; text?: string }>;
+    details?: unknown;
+  },
+  theme: Theme,
+): Text {
+  const content = result.content[0];
+  const value = content?.type === "text" ? content.text : "(no output)";
+  const details = result.details as SubagentDetails | undefined;
+  return new Text(
+    theme.fg(details?.error ? "error" : "muted", value ?? "(no output)"),
+    0,
+    0,
+  );
+}
+
+const renderers: ToolRenderers = {
+  subagent_message: {
+    renderResult: (result, _options, theme) => renderMuted(result, theme),
+  },
+  subagent_stop: {
+    renderResult: (result, _options, theme) => renderMuted(result, theme),
+  },
+  subagent_wait: {
+    renderResult: (result, _options, theme) => renderMuted(result, theme),
+  },
+  subagent_create: {
+    renderCall(args, theme) {
+      const { id, name } = args as Record<string, unknown>;
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("subagent_create"))} ${theme.fg("accent", String(id))} ${theme.fg("muted", String(name))}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const fallback = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
+      const run = details?.run;
+      if (!run) return new Text(fallback, 0, 0);
+      return new Text(
+        `${theme.fg("success", "created")} ${theme.fg("accent", run.id)} ${theme.fg("muted", `(${run.agent})`)}`,
+        0,
+        0,
+      );
+    },
+  },
+  subagent_list: {
+    renderResult(result, _options, theme) {
+      const content = result.content[0];
+      const fallback = content?.type === "text" ? content.text : "(no output)";
+      const details = result.details as SubagentDetails | undefined;
+      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
+      if (!details?.inventory) return new Text(fallback, 0, 0);
+      const kinds = details.inventory.kinds.map((kind) => kind.name);
+      const runs = details.inventory.runs.map(
+        (run) => `${run.id} (${run.name}) [${run.status}]`,
+      );
+      const kindLine = `${kinds.length} ${kinds.length === 1 ? "kind" : "kinds"}: ${kinds.join(", ") || "none"}`;
+      const runLine = `${runs.length} ${runs.length === 1 ? "run" : "runs"}: ${runs.join(", ") || "none"}`;
+      return new Text(
+        `${theme.fg("muted", kindLine)}\n${theme.fg("muted", runLine)}`,
+        0,
+        0,
+      );
+    },
+  },
+};
 
 export default function piSubagents(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENTS_MCP_URL) return;
@@ -95,6 +174,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
     runtime = await createAgentRuntime({
       cwd: ctx.cwd,
       projectTrusted: ctx.isProjectTrusted(),
+      sessionsDir: sessionsDirectory(homedir(), ctx.cwd),
       onUpdate: setWidget,
       onRootQuestion(id, prompt) {
         wakeOwner(
@@ -115,163 +195,56 @@ export default function piSubagents(pi: ExtensionAPI): void {
     await current?.close();
   });
 
-  pi.registerTool({
-    name: "subagent",
-    label: "Subagent",
-    description:
-      "Start a configured direct child, end this turn, and wake when that child completes.",
-    promptSnippet: "Start configured subagents and wait for their completion",
-    promptGuidelines: [
-      "Call subagent_list only to discover configured agent kinds before delegation.",
-      "Use a distinct id for each directly owned subagent.",
-      "Do not poll or sleep after starting subagents; the turn ends and each subagent wakes you with its own final output when it completes.",
-    ],
-    parameters: Type.Object({
-      id: Type.String({ minLength: 1, description: "Child identifier" }),
-      name: Type.String({ minLength: 1, description: "Configured agent kind" }),
-      prompt: Type.String({ minLength: 1, description: "Initial prompt" }),
-    }),
-    async execute(_toolCallId, params) {
-      if (!runtime) return errorResult("Subagent runtime is not running");
-      try {
-        const run = await runtime.start(params);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Started subagent ${run.id} using ${run.agent}`,
-            },
-          ],
-          details: { run: { id: run.id, agent: run.agent } },
-          terminate: true,
-        };
-      } catch (error) {
-        return errorResult(error);
+  registerPiTools(
+    pi,
+    OWNER_TOOLS,
+    async (name, args, signal) => {
+      if (!runtime) throw new Error("Subagent runtime is not running");
+      switch (name) {
+        case "subagent_create": {
+          const run = await runtime.create({
+            id: required(args, "id"),
+            name: required(args, "name"),
+            prompt: required(args, "prompt"),
+          });
+          return {
+            ...text(`Created subagent ${run.id} using ${run.agent}`, {
+              run: { id: run.id, agent: run.agent },
+            }),
+            terminate: true,
+          };
+        }
+        case "subagent_message": {
+          const id = required(args, "id");
+          await runtime.message(undefined, id, required(args, "message"));
+          return { ...text(`Message sent to ${id}`), terminate: true };
+        }
+        case "subagent_wait": {
+          const ids = Array.isArray(args.ids)
+            ? args.ids.map(String)
+            : undefined;
+          const notices = await runtime.wait(
+            undefined,
+            ids,
+            signal ?? new AbortController().signal,
+          );
+          return text(notices.join("\n\n"));
+        }
+        case "subagent_stop": {
+          const run = await runtime.stop(undefined, required(args, "id"));
+          return {
+            ...text(`Stopped subagent ${run.id} with status ${run.status}`),
+            terminate: true,
+          };
+        }
+        case "subagent_list": {
+          const inventory = await runtime.inventory();
+          return text(JSON.stringify(inventory), { inventory });
+        }
+        case "subagent_ask":
+          throw new Error("The root session has no owner to ask");
       }
     },
-    renderCall(args, theme) {
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", args.id)} ${theme.fg("muted", args.name)}`,
-        0,
-        0,
-      );
-    },
-    renderResult(result, _options, theme) {
-      const content = result.content[0];
-      const fallback = content?.type === "text" ? content.text : "(no output)";
-      const details = result.details as SubagentDetails | undefined;
-      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
-      const run = details?.run;
-      if (!run) return new Text(fallback, 0, 0);
-      return new Text(
-        `${theme.fg("success", "started")} ${theme.fg("accent", run.id)} ${theme.fg("muted", `(${run.agent})`)}`,
-        0,
-        0,
-      );
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_message",
-    label: "Subagent Message",
-    description:
-      "Send a message to a directly owned subagent and end this turn while it runs.",
-    parameters: Type.Object({
-      id: Type.String({ minLength: 1, description: "Direct child identifier" }),
-      message: Type.String({
-        minLength: 1,
-        description: "Steering message or answer",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      if (!runtime) return errorResult("Subagent runtime is not running");
-      try {
-        await runtime.message(undefined, params.id, params.message);
-        return {
-          content: [{ type: "text", text: `Message sent to ${params.id}` }],
-          details: undefined,
-          terminate: true,
-        };
-      } catch (error) {
-        return errorResult(error);
-      }
-    },
-    renderResult(result, _options, theme) {
-      const content = result.content[0];
-      const text = content?.type === "text" ? content.text : "(no output)";
-      const details = result.details as SubagentDetails | undefined;
-      return new Text(theme.fg(details?.error ? "error" : "muted", text), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_stop",
-    label: "Subagent Stop",
-    description:
-      "Stop a directly owned subagent and its subtree, end this turn, and wake when it is cancelled.",
-    parameters: Type.Object({
-      id: Type.String({ minLength: 1, description: "Direct child identifier" }),
-    }),
-    async execute(_toolCallId, params) {
-      if (!runtime) return errorResult("Subagent runtime is not running");
-      try {
-        const run = await runtime.stop(undefined, params.id);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Stopped subagent ${run.id} with status ${run.status}`,
-            },
-          ],
-          details: undefined,
-          terminate: true,
-        };
-      } catch (error) {
-        return errorResult(error);
-      }
-    },
-    renderResult(result, _options, theme) {
-      const content = result.content[0];
-      const text = content?.type === "text" ? content.text : "(no output)";
-      const details = result.details as SubagentDetails | undefined;
-      return new Text(theme.fg(details?.error ? "error" : "muted", text), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_list",
-    label: "Subagent List",
-    description: "List configured agent kinds and directly owned runs.",
-    parameters: Type.Object({}),
-    async execute() {
-      if (!runtime) return errorResult("Subagent runtime is not running");
-      try {
-        const inventory = await runtime.inventory();
-        return {
-          content: [{ type: "text", text: JSON.stringify(inventory) }],
-          details: { inventory },
-        };
-      } catch (error) {
-        return errorResult(error);
-      }
-    },
-    renderResult(result, _options, theme) {
-      const content = result.content[0];
-      const fallback = content?.type === "text" ? content.text : "(no output)";
-      const details = result.details as SubagentDetails | undefined;
-      if (details?.error) return new Text(theme.fg("error", fallback), 0, 0);
-      if (!details?.inventory) return new Text(fallback, 0, 0);
-      const kinds = details.inventory.kinds.map((kind) => kind.name);
-      const runs = details.inventory.runs.map(
-        (run) => `${run.id} (${run.name}) [${run.status}]`,
-      );
-      const kindLine = `${kinds.length} ${kinds.length === 1 ? "kind" : "kinds"}: ${kinds.join(", ") || "none"}`;
-      const runLine = `${runs.length} ${runs.length === 1 ? "run" : "runs"}: ${runs.join(", ") || "none"}`;
-      return new Text(
-        `${theme.fg("muted", kindLine)}\n${theme.fg("muted", runLine)}`,
-        0,
-        0,
-      );
-    },
-  });
+    renderers,
+  );
 }

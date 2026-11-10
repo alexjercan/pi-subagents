@@ -1,7 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Type } from "typebox";
+import { registerPiTools } from "./pi-tools.ts";
+import { SUBAGENT_TOOLS } from "./tools.ts";
 
 interface McpContent {
   type: string;
@@ -16,7 +17,7 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
     const authorization = process.env.PI_SUBAGENTS_MCP_AUTHORIZATION;
     if (!url || !authorization)
       throw new Error("Subagent MCP connection is not configured");
-    client = new Client({ name: "pi-subagent-bridge", version: "0.1.0" });
+    client = new Client({ name: "pi-subagent-bridge", version: "0.2.0" });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(url), {
         requestInit: { headers: { Authorization: authorization } },
@@ -30,11 +31,7 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
     await connected?.close();
   });
 
-  const invoke = async (
-    name: string,
-    args: Record<string, unknown>,
-    signal?: AbortSignal,
-  ) => {
+  registerPiTools(pi, SUBAGENT_TOOLS, async (name, args, signal) => {
     if (!client) throw new Error("Subagent MCP connection is not running");
     const result = await client.callTool({ name, arguments: args }, undefined, {
       signal,
@@ -50,66 +47,5 @@ export default function piSubagentBridge(pi: ExtensionAPI): void {
       details: {},
       ...(result.isError ? { isError: true } : {}),
     };
-  };
-
-  pi.registerTool({
-    name: "subagent",
-    label: "Subagent",
-    description:
-      "Start a configured direct child and return its current state. Child completion and questions are sent to this owner automatically.",
-    parameters: Type.Object({
-      id: Type.String({ description: "Owner-scoped child identifier" }),
-      name: Type.String({ description: "Configured agent kind" }),
-      prompt: Type.String({ description: "Initial prompt" }),
-    }),
-    execute: (_id, params, signal) => invoke("subagent", params, signal),
-  });
-
-  pi.registerTool({
-    name: "subagent_message",
-    label: "Subagent Message",
-    description:
-      "Send a message to a directly owned child and return its current state. Child completion and questions are sent to this owner automatically.",
-    parameters: Type.Object({
-      id: Type.String({ description: "Direct child identifier" }),
-      message: Type.String({ description: "Message or question response" }),
-    }),
-    execute: (_id, params, signal) =>
-      invoke("subagent_message", params, signal),
-  });
-
-  pi.registerTool({
-    name: "subagent_stop",
-    label: "Subagent Stop",
-    description:
-      "Stop a directly owned child and its subtree and wait for its final state.",
-    parameters: Type.Object({
-      id: Type.String({ description: "Direct child identifier" }),
-    }),
-    execute: (_id, params, signal) => invoke("subagent_stop", params, signal),
-  });
-
-  pi.registerTool({
-    name: "subagent_list",
-    label: "Subagent List",
-    description: "List allowed agent kinds and directly owned runs.",
-    parameters: Type.Object({}),
-    execute: (_id, _params, signal) => invoke("subagent_list", {}, signal),
-  });
-
-  pi.registerTool({
-    name: "subagent_ask",
-    label: "Subagent Ask",
-    description: "Ask the direct owner a question and wait for its answer.",
-    promptSnippet: "Ask your owner for required information or decisions",
-    promptGuidelines: [
-      "Use subagent_ask whenever you need information or a decision from your owner.",
-      "Never return an owner-directed question as final output.",
-      "Continue the original task after your owner responds.",
-    ],
-    parameters: Type.Object({
-      prompt: Type.String({ description: "Question for the direct owner" }),
-    }),
-    execute: (_id, params, signal) => invoke("subagent_ask", params, signal),
   });
 }

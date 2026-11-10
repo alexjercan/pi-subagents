@@ -6,19 +6,79 @@ import { spawn } from "node:child_process";
 import test, { after, before } from "node:test";
 import {
   spawnHarness,
+  type HarnessConfig,
+  type HarnessDelegation,
   type HarnessEvent,
+  type HarnessRequest,
 } from "../extensions/pi-subagents/harness.ts";
 import { normalizeClaudeRecord } from "../extensions/pi-subagents/harnesses/claude.ts";
 import { spawnJsonlProcess } from "../extensions/pi-subagents/process.ts";
+import {
+  createToolServer,
+  type DelegationOperations,
+} from "../extensions/pi-subagents/tools.ts";
+import { claudeFixture, installExecutables, stderrLines } from "./fixtures.ts";
 
-const claudeSessionId = "5f0c2d1e-8a4b-4c3d-9e2f-1a2b3c4d5e6f";
+const runId = "5f0c2d1e-8a4b-4c3d-9e2f-1a2b3c4d5e6f";
 let fixtureDirectory = "";
 let previousPath = "";
+
+const claudeConfig: HarnessConfig = {
+  harness: "claude",
+  model: "sonnet",
+  thinking: "high",
+  permissionMode: "bypassPermissions",
+};
+const piConfig: HarnessConfig = {
+  harness: "pi",
+  model: "openai/gpt-test",
+  thinking: "medium",
+};
+
+function request(prompt: string, resume = false): HarnessRequest {
+  return {
+    cwd: process.cwd(),
+    prompt,
+    runId,
+    resume,
+    sessionsDir: fixtureDirectory,
+  };
+}
+
+function operations(
+  overrides: Partial<DelegationOperations> = {},
+): DelegationOperations {
+  return {
+    create: async () => ({ status: "running" }),
+    message: async () => ({ status: "running" }),
+    wait: async () => [],
+    stop: async () => ({ status: "stopped" }),
+    list: async () => ({ kinds: [], runs: [] }),
+    ask: async () => "answer",
+    ...overrides,
+  };
+}
+
+function delegation(
+  overrides: Partial<DelegationOperations> = {},
+): HarnessDelegation {
+  return {
+    http: () => ({
+      url: "http://127.0.0.1:1234/mcp",
+      authorization: "Bearer secret",
+    }),
+    server: () =>
+      createToolServer(operations(overrides), {
+        callerRunId: runId,
+        agents: new Set(["scout"]),
+      }),
+  };
+}
 
 const fixture = `#!/usr/bin/env node
 const harness = process.argv[1].split("/").at(-1);
 const args = process.argv.slice(2);
-process.stderr.write(JSON.stringify({ args, disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, waitCeiling: process.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS }) + "\\n");
+process.stderr.write(JSON.stringify({ args, disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, waitCeiling: process.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, noPrefix: process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX }) + "\\n");
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -28,6 +88,11 @@ process.stdin.on("data", (chunk) => {
     const command = JSON.parse(input.slice(0, newline));
     const prompt = command.message?.content ?? command.message;
     input = input.slice(newline + 1);
+    if (command.type === "control_request") {
+      process.stderr.write(JSON.stringify({ control: command.request.subtype }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: command.request_id, response: {} } }) + "\\n");
+      continue;
+    }
     if (harness === "pi" && command.type !== "extension_ui_response" && (command.type !== "prompt" || command.streamingBehavior !== "steer")) continue;
     if (prompt === "malformed") {
       process.stdout.write("not-json\\n");
@@ -100,26 +165,27 @@ after(async () => {
 test("Pi emits messages, tool lifecycle, usage, and configured arguments", async () => {
   const events: HarnessEvent[] = [];
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "inspect" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "medium" },
+    request("inspect"),
+    piConfig,
     { system: "Inspect carefully.", tools: ["read", "grep"] },
     (event) => events.push(event),
   );
   const result = await run.completion;
-  const invocation = JSON.parse(result.stderr) as { args: string[] };
+  const invocation = stderrLines(result.stderr)[0] as { args: string[] };
 
   assert.equal(result.exitCode, 0);
-  assert.equal(result.finalText, "pi finished");
-  assert.deepEqual(invocation.args.slice(0, 7), [
-    "--no-session",
+  assert.equal(result.report, "pi finished");
+  assert.deepEqual(invocation.args, [
     "--mode",
     "rpc",
+    "--session-id",
+    runId,
+    "--session-dir",
+    fixtureDirectory,
     "--model",
     "openai/gpt-test",
     "--thinking",
     "medium",
-  ]);
-  assert.deepEqual(invocation.args.slice(7, 11), [
     "--append-system-prompt",
     "Inspect carefully.",
     "--tools",
@@ -149,45 +215,58 @@ test("Pi emits messages, tool lifecycle, usage, and configured arguments", async
   });
 });
 
+test("A delegating Pi child loads the bridge, the subagent tools, and the HTTP grant", async () => {
+  const run = spawnHarness(
+    request("inspect"),
+    piConfig,
+    {
+      system: "Delegate.",
+      tools: ["read"],
+      delegation: delegation(),
+    },
+    () => undefined,
+  );
+  const result = await run.completion;
+  const invocation = stderrLines(result.stderr)[0] as { args: string[] };
+  const extensionIndex = invocation.args.indexOf("--extension");
+  assert.ok(extensionIndex > 0);
+  assert.match(invocation.args[extensionIndex + 1] ?? "", /bridge\.ts$/);
+  assert.deepEqual(invocation.args.slice(-2), [
+    "--tools",
+    "read,subagent_create,subagent_message,subagent_wait,subagent_list,subagent_stop,subagent_ask",
+  ]);
+});
+
 test("Claude emits messages, tool lifecycle, usage, and configured invocation", async () => {
   const events: HarnessEvent[] = [];
   const run = spawnHarness(
-    {
-      cwd: process.cwd(),
-      prompt: "inspect",
-      sessionId: claudeSessionId,
-    },
-    {
-      harness: "claude",
-      model: "sonnet",
-      thinking: "high",
-      permissionMode: "bypassPermissions",
-    },
+    request("inspect"),
+    claudeConfig,
     {
       system: "Implement carefully.",
       tools: ["read", "ls", "find", "web_search"],
-      delegation: {
-        url: "http://127.0.0.1:1234/mcp",
-        authorization: "Bearer secret",
-      },
+      delegation: delegation(),
     },
     (event) => events.push(event),
   );
   const result = await run.completion;
-  const invocation = JSON.parse(result.stderr) as {
+  const lines = stderrLines(result.stderr);
+  const invocation = lines[0] as {
     args: string[];
-    disableBackgroundTasks: string;
+    disableBackgroundTasks?: string;
     waitCeiling: string;
+    noPrefix: string;
   };
 
   assert.equal(result.exitCode, 0);
-  assert.equal(result.finalText, "claude finished");
-  assert.equal(invocation.disableBackgroundTasks, "1");
+  assert.equal(result.report, "claude finished");
+  assert.equal(invocation.disableBackgroundTasks, undefined);
   assert.equal(invocation.waitCeiling, "0");
+  assert.equal(invocation.noPrefix, "1");
   assert.deepEqual(invocation.args.slice(0, 9), [
     "--print",
     "--session-id",
-    claudeSessionId,
+    runId,
     "--model",
     "sonnet",
     "--effort",
@@ -204,25 +283,16 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   ]);
   assert.ok(invocation.args.includes("--input-format"));
   assert.ok(invocation.args.includes("stream-json"));
-  const mcpConfig = JSON.parse(
-    invocation.args[invocation.args.indexOf("--mcp-config") + 1] ?? "",
-  ) as Record<string, unknown>;
-  assert.deepEqual(mcpConfig, {
-    mcpServers: {
-      pi_subagents: {
-        type: "http",
-        url: "http://127.0.0.1:1234/mcp",
-        headers: { Authorization: "Bearer secret" },
-        timeout: 2147483647,
-      },
-    },
-  });
+  assert.equal(invocation.args.includes("--mcp-config"), false);
   assert.ok(invocation.args.includes("--strict-mcp-config"));
-  const disallowedIndex = invocation.args.indexOf("--disallowedTools");
-  assert.deepEqual(
-    invocation.args.slice(disallowedIndex, disallowedIndex + 2),
-    ["--disallowedTools", "Task,Agent,AskUserQuestion"],
-  );
+  const allowedIndex = invocation.args.indexOf("--allowedTools");
+  assert.deepEqual(invocation.args.slice(allowedIndex, allowedIndex + 4), [
+    "--allowedTools",
+    "subagent_create,subagent_message,subagent_wait,subagent_list,subagent_stop,subagent_ask",
+    "--disallowedTools",
+    "Task,Agent,AskUserQuestion",
+  ]);
+  assert.deepEqual(lines[1], { control: "initialize" });
   assert.deepEqual(
     events.map((event) => event.type),
     ["message", "tool_start", "usage", "message", "tool_end", "usage"],
@@ -258,22 +328,126 @@ test("Claude emits messages, tool lifecycle, usage, and configured invocation", 
   });
 });
 
-test("Claude refuses to launch without a session id", () => {
-  assert.throws(
-    () =>
-      spawnHarness(
-        { cwd: process.cwd(), prompt: "inspect" },
-        {
-          harness: "claude",
-          model: "sonnet",
-          thinking: "high",
-          permissionMode: "bypassPermissions",
-        },
-        { system: "Inspect." },
-        () => undefined,
-      ),
-    /^Error: Claude harness requires a session id$/,
+test("Claude answers SDK MCP control requests over its own stdio", async () => {
+  let answer: (value: string) => void = () => undefined;
+  let asked = "";
+  const executables = await installExecutables({
+    claude: claudeFixture(`
+onPrompt(async (content) => {
+  const answered = await mcp.call("subagent_ask", { prompt: "Which color?" });
+  result(content + " -> " + answered.text);
+});
+`),
+  });
+  try {
+    const run = spawnHarness(
+      request("paint"),
+      claudeConfig,
+      {
+        system: "Ask first.",
+        delegation: delegation({
+          ask: (_caller, prompt) => {
+            asked = prompt;
+            return new Promise<string>((resolve) => {
+              answer = resolve;
+            });
+          },
+        }),
+      },
+      () => undefined,
+    );
+    while (!asked) await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    answer("teal");
+    const result = await run.completion;
+    const lines = stderrLines(result.stderr);
+    assert.equal(result.report, "paint -> teal");
+    assert.deepEqual(lines[1], {
+      control: "initialize",
+      sdkMcpServers: ["pi_subagents"],
+      sdkMcpServerConfigs: {
+        pi_subagents: { timeout: 2147483647, alwaysLoad: true },
+      },
+    });
+    assert.deepEqual(
+      lines.find((line) => "tools" in line),
+      {
+        tools: [
+          "subagent_create",
+          "subagent_message",
+          "subagent_wait",
+          "subagent_list",
+          "subagent_stop",
+          "subagent_ask",
+        ],
+      },
+    );
+    assert.deepEqual(
+      lines.find((line) => "prompt" in line),
+      { prompt: "paint" },
+    );
+  } finally {
+    await executables.dispose();
+  }
+});
+
+test("An unsupported Claude control request fails the run loudly", async () => {
+  const executables = await installExecutables({
+    claude: claudeFixture(`
+onPrompt(async () => {
+  write({ type: "control_request", request_id: "perm-1", request: { subtype: "can_use_tool", tool_name: "Bash" } });
+});
+`),
+  });
+  try {
+    const run = spawnHarness(
+      request("go"),
+      claudeConfig,
+      { system: "Go.", delegation: delegation() },
+      () => undefined,
+    );
+    await assert.rejects(
+      run.completion,
+      /^Error: Claude sent an unsupported control request: can_use_tool$/,
+    );
+  } finally {
+    await executables.dispose();
+  }
+});
+
+test("A profile without delegates launches Claude without the SDK server and Pi without the bridge", async () => {
+  const claude = spawnHarness(
+    request("inspect"),
+    claudeConfig,
+    { system: "Inspect.", tools: ["read"] },
+    () => undefined,
   );
+  const claudeResult = await claude.completion;
+  const claudeLines = stderrLines(claudeResult.stderr);
+  const claudeInvocation = claudeLines[0] as {
+    args: string[];
+    noPrefix?: string;
+  };
+  assert.equal(claudeLines.length, 1);
+  assert.equal(claudeInvocation.noPrefix, undefined);
+  for (const flag of [
+    "--allowedTools",
+    "--disallowedTools",
+    "--strict-mcp-config",
+    "--mcp-config",
+  ])
+    assert.equal(claudeInvocation.args.includes(flag), false, flag);
+
+  const pi = spawnHarness(
+    request("inspect"),
+    piConfig,
+    { system: "Inspect.", tools: ["read"] },
+    () => undefined,
+  );
+  const piResult = await pi.completion;
+  const piInvocation = stderrLines(piResult.stderr)[0] as { args: string[] };
+  assert.equal(piInvocation.args.includes("--extension"), false);
+  assert.deepEqual(piInvocation.args.slice(-2), ["--tools", "read"]);
 });
 
 test("A harness can accept another prompt after a settled turn", async () => {
@@ -283,11 +457,7 @@ test("A harness can accept another prompt after a settled turn", async () => {
     finishFirstTurn = resolve;
   });
   const run = spawnHarness(
-    {
-      cwd: process.cwd(),
-      prompt: "first",
-      sessionId: claudeSessionId,
-    },
+    request("first"),
     {
       harness: "claude",
       model: "haiku",
@@ -312,22 +482,22 @@ test("A harness can accept another prompt after a settled turn", async () => {
     await run.send("second");
     const result = await run.completion;
     assert.equal(turns, 2);
-    assert.equal(result.finalText, "first report\n\nsecond report");
+    assert.equal(result.report, "second report");
     assert.equal(result.exitCode, 0);
   } finally {
     run.stop();
   }
 });
 
-test("An idle Pi harness resumes when sent a second prompt", async () => {
+test("A settled Pi harness accepts a second prompt", async () => {
   let turns = 0;
   let finishFirstTurn: () => void = () => undefined;
   const firstTurn = new Promise<void>((resolve) => {
     finishFirstTurn = resolve;
   });
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "first" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "medium" },
+    request("first"),
+    piConfig,
     {
       system: "Reply briefly.",
       onTurnSettled: () => {
@@ -348,13 +518,13 @@ test("An idle Pi harness resumes when sent a second prompt", async () => {
       run.completion,
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error("Idle Pi harness did not resume")),
+          () => reject(new Error("Settled Pi harness did not resume")),
           500,
         ),
       ),
     ]);
     assert.equal(turns, 2);
-    assert.equal(result.finalText, "first report\n\nsecond report");
+    assert.equal(result.report, "second report");
     assert.equal(result.exitCode, 0);
   } finally {
     run.stop();
@@ -363,8 +533,8 @@ test("An idle Pi harness resumes when sent a second prompt", async () => {
 
 test("Malformed harness output rejects completion", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "malformed" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("malformed"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
@@ -373,8 +543,8 @@ test("Malformed harness output rejects completion", async () => {
 
 test("An unsolicited clean exit before settlement fails loudly", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "exit-unsettled" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("exit-unsettled"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
@@ -386,30 +556,21 @@ test("An unsolicited clean exit before settlement fails loudly", async () => {
 
 test("A running harness accepts a steering message", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "wait" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "medium" },
+    request("wait"),
+    piConfig,
     { system: "Wait." },
     () => undefined,
   );
   await new Promise((resolve) => setTimeout(resolve, 30));
   await run.send("continue");
   const result = await run.completion;
-  assert.equal(result.finalText, "pi finished");
+  assert.equal(result.report, "pi finished");
 });
 
 test("Stopping a harness terminates its process", async () => {
   const run = spawnHarness(
-    {
-      cwd: process.cwd(),
-      prompt: "wait",
-      sessionId: claudeSessionId,
-    },
-    {
-      harness: "claude",
-      model: "sonnet",
-      thinking: "medium",
-      permissionMode: "bypassPermissions",
-    },
+    request("wait"),
+    claudeConfig,
     { system: "Wait." },
     () => undefined,
   );
@@ -420,22 +581,13 @@ test("Stopping a harness terminates its process", async () => {
 
 test("Claude forwards the configured permission mode", async () => {
   const run = spawnHarness(
-    {
-      cwd: process.cwd(),
-      prompt: "inspect",
-      sessionId: claudeSessionId,
-    },
-    {
-      harness: "claude",
-      model: "sonnet",
-      thinking: "high",
-      permissionMode: "auto",
-    },
+    request("inspect"),
+    { ...claudeConfig, permissionMode: "auto" },
     { system: "Inspect." },
     () => undefined,
   );
   const result = await run.completion;
-  const invocation = JSON.parse(result.stderr) as { args: string[] };
+  const invocation = stderrLines(result.stderr)[0] as { args: string[] };
   const index = invocation.args.indexOf("--permission-mode");
   assert.deepEqual(invocation.args.slice(index, index + 2), [
     "--permission-mode",
@@ -485,8 +637,8 @@ test("Claude turn errors carry the reported errors", () => {
 
 test("A rejected Pi prompt fails the run and stops the harness", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "reject" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("reject"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
@@ -495,22 +647,22 @@ test("A rejected Pi prompt fails the run and stops the harness", async () => {
 
 test("A Pi turn that ends with an error fails the run", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "pi-error" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("pi-error"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
   await assert.rejects(run.completion, /^Error: 529 overloaded$/);
 });
 
-test("A failed later turn keeps the reports of earlier turns", async () => {
+test("A failed later turn rejects with that turn's error", async () => {
   let finishFirstTurn: () => void = () => undefined;
   const firstTurn = new Promise<void>((resolve) => {
     finishFirstTurn = resolve;
   });
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "first" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("first"),
+    piConfig,
     {
       system: "Inspect.",
       onTurnSettled: () => {
@@ -522,33 +674,30 @@ test("A failed later turn keeps the reports of earlier turns", async () => {
   );
   await firstTurn;
   await run.send("pi-error");
-  await assert.rejects(
-    run.completion,
-    /^Error: 529 overloaded\n\nfirst report$/,
-  );
+  await assert.rejects(run.completion, /^Error: 529 overloaded$/);
 });
 
 test("A Pi turn that recovers after a retried error completes", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "pi-retry" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("pi-retry"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
   const result = await run.completion;
-  assert.equal(result.finalText, "recovered");
+  assert.equal(result.report, "recovered");
   assert.equal(result.finished, true);
 });
 
 test("Pi dialog requests are answered as cancelled", async () => {
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "dialog" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("dialog"),
+    piConfig,
     { system: "Inspect." },
     () => undefined,
   );
   const result = await run.completion;
-  assert.deepEqual(JSON.parse(result.finalText), {
+  assert.deepEqual(JSON.parse(result.report), {
     type: "extension_ui_response",
     id: "ui-1",
     cancelled: true,
@@ -558,8 +707,8 @@ test("Pi dialog requests are answered as cancelled", async () => {
 test("Stopping a harness kills its process group after the grace period", async () => {
   let grandchild = 0;
   const run = spawnHarness(
-    { cwd: process.cwd(), prompt: "group" },
-    { harness: "pi", model: "openai/gpt-test", thinking: "low" },
+    request("group"),
+    piConfig,
     { system: "Inspect." },
     (event) => {
       if (event.type === "message") grandchild = Number(event.message.content);

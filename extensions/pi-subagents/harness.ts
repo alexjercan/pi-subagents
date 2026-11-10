@@ -1,3 +1,4 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createClaudeAdapter } from "./harnesses/claude.ts";
 import { createPiAdapter } from "./harnesses/pi.ts";
 import type { AgentTool } from "./config.ts";
@@ -26,17 +27,21 @@ export type HarnessConfig =
 export interface HarnessRequest {
   cwd: string;
   prompt: string;
-  sessionId?: string;
+  runId: string;
+  resume: boolean;
+  sessionsDir: string;
+}
+
+export interface HarnessDelegation {
+  http(): { url: string; authorization: string };
+  server(): McpServer;
 }
 
 export interface HarnessLaunchOptions {
   system: string;
   tools?: AgentTool[];
   onTurnSettled?: () => boolean;
-  delegation?: {
-    url: string;
-    authorization: string;
-  };
+  delegation?: HarnessDelegation;
 }
 
 export interface HarnessMessage {
@@ -71,7 +76,7 @@ export interface HarnessResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   finished: boolean;
-  finalText: string;
+  report: string;
   stderr: string;
 }
 
@@ -92,7 +97,7 @@ export function spawnHarness(
     config.harness === "pi"
       ? createPiAdapter(request, config, options)
       : createClaudeAdapter(request, config, options);
-  const reports: string[] = [];
+  let report = "";
   let turnText = "";
   let turnError: string | undefined;
   let failure: Error | undefined;
@@ -104,6 +109,15 @@ export function spawnHarness(
     failure ??= error instanceof Error ? error : new Error(String(error));
     processRun.stop();
   };
+  const reply = async (value: unknown | Promise<unknown>) => {
+    const frame = await value;
+    if (frame === undefined || finished) return;
+    try {
+      await processRun.send(frame);
+    } catch (error) {
+      if (!stopRequested) throw error;
+    }
+  };
   processRun = spawnJsonlProcess(adapter.process, (value) => {
     const normalized = adapter.normalize(value);
     if (normalized.finalText !== undefined) {
@@ -113,14 +127,13 @@ export function spawnHarness(
       turnError = normalized.error;
     }
     for (const event of normalized.events) onEvent(event);
-    if (normalized.reply !== undefined)
-      processRun.send(normalized.reply).catch(fail);
+    if (normalized.reply !== undefined) reply(normalized.reply).catch(fail);
     if (!normalized.settled) return;
     if (turnError !== undefined) {
       fail(new Error(turnError));
       return;
     }
-    if (turnText) reports.push(turnText);
+    report = turnText;
     turnText = "";
     turnActive = false;
     if (options.onTurnSettled?.() ?? true) {
@@ -128,9 +141,10 @@ export function spawnHarness(
       processRun.end();
     }
   });
-  const initialized = processRun
-    .send(adapter.prompt(request.prompt))
-    .catch(fail);
+  const initialized = (async () => {
+    for (const frame of adapter.opening) await processRun.send(frame);
+    await processRun.send(adapter.prompt(request.prompt));
+  })().catch(fail);
   return {
     pid: processRun.pid,
     send: (message) => {
@@ -143,16 +157,14 @@ export function spawnHarness(
     },
     completion: Promise.all([initialized, processRun.completion]).then(
       ([, result]) => {
-        const withReports = (message: string) =>
-          new Error([message, ...reports].join("\n\n"));
-        if (failure) throw withReports(failure.message);
+        if (failure) throw failure;
         if (turnActive && result.signal === null && !stopRequested) {
           const stderr = result.stderr.trim();
-          throw withReports(
+          throw new Error(
             `Harness exited with code ${result.exitCode} before reporting completion${stderr ? `\n${stderr}` : ""}`,
           );
         }
-        return { ...result, finished, finalText: reports.join("\n\n") };
+        return { ...result, finished, report };
       },
     ),
   };

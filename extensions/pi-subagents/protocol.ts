@@ -5,7 +5,7 @@ export interface NormalizedRecord {
   finalText?: string;
   error?: string;
   settled?: boolean;
-  reply?: unknown;
+  reply?: unknown | Promise<unknown>;
 }
 
 export interface HarnessAdapter {
@@ -15,6 +15,7 @@ export interface HarnessAdapter {
     cwd: string;
     env?: NodeJS.ProcessEnv;
   };
+  opening: unknown[];
   prompt(message: string): unknown;
   normalize(value: unknown): NormalizedRecord;
 }

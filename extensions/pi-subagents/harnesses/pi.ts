@@ -1,3 +1,5 @@
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   HarnessConfig,
@@ -14,11 +16,20 @@ import {
   type HarnessAdapter,
   type NormalizedRecord,
 } from "../protocol.ts";
-import { SUBAGENT_TOOL_NAMES } from "../tool-names.ts";
+import { SUBAGENT_TOOLS } from "../tools.ts";
 
 type PiConfig = Extract<HarnessConfig, { harness: "pi" }>;
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+
+export async function piSessionPath(
+  sessionsDir: string,
+  runId: string,
+): Promise<string | undefined> {
+  const entries = await readdir(sessionsDir);
+  const name = entries.find((entry) => entry.endsWith(`_${runId}.jsonl`));
+  return name === undefined ? undefined : join(sessionsDir, name);
+}
 
 export function createPiAdapter(
   request: HarnessRequest,
@@ -26,9 +37,12 @@ export function createPiAdapter(
   options: HarnessLaunchOptions,
 ): HarnessAdapter {
   const args = [
-    "--no-session",
     "--mode",
     "rpc",
+    "--session-id",
+    request.runId,
+    "--session-dir",
+    request.sessionsDir,
     "--model",
     config.model,
     "--thinking",
@@ -43,25 +57,27 @@ export function createPiAdapter(
     );
   }
   if (options.tools !== undefined) {
-    const tools = options.delegation
-      ? [...options.tools, ...SUBAGENT_TOOL_NAMES]
+    const tools: string[] = options.delegation
+      ? [...options.tools, ...SUBAGENT_TOOLS.map((tool) => tool.name)]
       : options.tools;
     if (tools.length === 0) args.push("--no-tools");
     else args.push("--tools", [...new Set(tools)].join(","));
   }
+  const http = options.delegation?.http();
   return {
     process: {
       command: "pi",
       args,
       cwd: request.cwd,
-      env: options.delegation
+      env: http
         ? {
             ...process.env,
-            PI_SUBAGENTS_MCP_URL: options.delegation.url,
-            PI_SUBAGENTS_MCP_AUTHORIZATION: options.delegation.authorization,
+            PI_SUBAGENTS_MCP_URL: http.url,
+            PI_SUBAGENTS_MCP_AUTHORIZATION: http.authorization,
           }
         : undefined,
     },
+    opening: [],
     prompt: (message) => ({
       type: "prompt",
       message,

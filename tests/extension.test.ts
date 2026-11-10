@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,7 +113,9 @@ process.stdin.once("data", (chunk) => {
   );
   await chmod(claude, 0o755);
   const previousPath = process.env.PATH;
+  const previousHome = process.env.HOME;
   process.env.PATH = `${directory}:${previousPath ?? ""}`;
+  process.env.HOME = directory;
 
   const handlers = new Map<
     string,
@@ -162,13 +165,25 @@ process.stdin.once("data", (chunk) => {
   try {
     piSubagents(pi);
     assert.deepEqual([...tools.keys()].sort(), [
-      "subagent",
+      "subagent_create",
       "subagent_list",
       "subagent_message",
       "subagent_stop",
+      "subagent_wait",
     ]);
     await handlers.get("session_start")?.({}, context);
-    const tool = tools.get("subagent");
+    assert.ok(
+      existsSync(
+        join(
+          directory,
+          ".pi",
+          "agent",
+          "subagents",
+          project.replace(/[^A-Za-z0-9._-]/g, "-"),
+        ),
+      ) === false,
+    );
+    const tool = tools.get("subagent_create");
     assert.ok(tool);
     const slow = await tool.execute(
       "slow-call",
@@ -191,7 +206,7 @@ process.stdin.once("data", (chunk) => {
         .renderResult?.(slow, { isPartial: false }, theme)
         .render(120)
         .map((line) => line.trimEnd()),
-      ["started slow (scout)"],
+      ["created slow (scout)"],
     );
     const listTool = tools.get("subagent_list");
     assert.ok(listTool);
@@ -211,6 +226,17 @@ process.stdin.once("data", (chunk) => {
       "2 runs: slow (scout) [running], fast (scout) [running]",
     ]);
     assert.ok(listLines?.every((line) => !line.includes("{")));
+    assert.ok(
+      existsSync(
+        join(
+          directory,
+          ".pi",
+          "agent",
+          "subagents",
+          project.replace(/[^A-Za-z0-9._-]/g, "-"),
+        ),
+      ),
+    );
     assert.ok(widgets.some((value) => typeof value === "function"));
     await until(() => messages.length >= 1);
     assert.deepEqual(messages[0], {
@@ -295,6 +321,7 @@ process.stdin.once("data", (chunk) => {
   } finally {
     await handlers.get("session_shutdown")?.({}, context);
     process.env.PATH = previousPath;
+    process.env.HOME = previousHome;
     await rm(directory, { recursive: true, force: true });
   }
 });
