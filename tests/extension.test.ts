@@ -242,7 +242,7 @@ process.stdin.once("data", (chunk) => {
     assert.deepEqual(messages[0], {
       message: {
         customType: "pi-subagents",
-        content: "Subagent fast finished with status completed.\nFast done",
+        content: "Subagent fast is idle.\nFast done",
         display: true,
       },
       options: { triggerTurn: true, deliverAs: "steer" },
@@ -259,11 +259,11 @@ process.stdin.once("data", (chunk) => {
         .renderResult?.(pending, { isPartial: false }, theme)
         .render(120)
         .map((line) => line.trimEnd()),
-      ["1 kind: scout", "1 run: slow (scout) [running]"],
+      ["1 kind: scout", "2 runs: slow (scout) [running], fast (scout) [idle]"],
     );
     assert.ok(
       widgetRenders.some((lines) =>
-        /total: 2  completed: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
+        /total: 2  ended: 1  tokens: 11  cost: \$0.01/.test(lines[0] ?? ""),
       ),
     );
     const messageTool = tools.get("subagent_message");
@@ -280,7 +280,7 @@ process.stdin.once("data", (chunk) => {
     assert.deepEqual(messages[1], {
       message: {
         customType: "pi-subagents",
-        content: "Subagent slow finished with status completed.\nSlow done",
+        content: "Subagent slow is idle.\nSlow done",
         display: true,
       },
       options: { triggerTurn: true, deliverAs: "steer" },

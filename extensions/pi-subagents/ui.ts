@@ -14,7 +14,7 @@ export interface AgentTreeTheme {
 
 interface Activity {
   id?: string;
-  status: "running" | "completed" | "failed" | "text";
+  status: "running" | "done" | "failed" | "text";
   text: string;
 }
 
@@ -111,7 +111,7 @@ function activities(run: AgentRunSnapshot): Activity[] {
     }
     if (event.type === "tool_end") {
       const activity = tools.get(event.id);
-      if (activity) activity.status = event.isError ? "failed" : "completed";
+      if (activity) activity.status = event.isError ? "failed" : "done";
     }
     if (event.type === "message" && event.message.role === "assistant") {
       const text = compact(textContent(event.message.content));
@@ -148,7 +148,7 @@ function formatUsage(usage: AgentUsage): string {
 function status(run: AgentRunSnapshot, theme: AgentTreeTheme): string {
   if (run.status === "running") return theme.warning("[>]");
   if (run.status === "waiting") return theme.warning("[?]");
-  if (run.status === "completed") return theme.success("[ok]");
+  if (run.status === "idle") return theme.success("[ok]");
   if (run.status === "failed") return theme.error("[x]");
   return theme.muted("[-]");
 }
@@ -227,14 +227,14 @@ export function renderAgentTree(
     usage.outputTokens +
     usage.cacheReadTokens +
     usage.cacheWriteTokens;
-  const completed = runs.filter(
+  const ended = runs.filter(
     (run) => run.status !== "running" && run.status !== "waiting",
   ).length;
   const cost =
     usage.costUsd === undefined ? "n/a" : `$${usage.costUsd.toFixed(2)}`;
   const lines = [
     theme.bold(
-      `Subagents  total: ${runs.length}  completed: ${completed}  tokens: ${formatCount(tokenTotal)}  cost: ${cost}`,
+      `Subagents  total: ${runs.length}  ended: ${ended}  tokens: ${formatCount(tokenTotal)}  cost: ${cost}`,
     ),
   ];
 
@@ -260,7 +260,7 @@ export function renderAgentTree(
       const marker =
         activity.status === "running"
           ? theme.warning("[..]")
-          : activity.status === "completed"
+          : activity.status === "done"
             ? theme.success("[ok]")
             : activity.status === "failed"
               ? theme.error("[x]")

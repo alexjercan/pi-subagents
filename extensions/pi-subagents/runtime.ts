@@ -6,10 +6,10 @@ import {
   type LoadAgentProfilesOptions,
 } from "./config.ts";
 import {
+  harnessSession,
   spawnHarness,
   type ClaudeThinkingLevel,
   type HarnessEvent,
-  type HarnessResult,
   type HarnessRun,
   type HarnessUsage,
   type PiThinkingLevel,
@@ -24,9 +24,9 @@ import { DELEGATION_GUIDANCE } from "./tools.ts";
 export type AgentRunStatus =
   | "running"
   | "waiting"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  | "idle"
+  | "stopped"
+  | "failed";
 
 export interface AgentUsage {
   inputTokens: number;
@@ -52,7 +52,8 @@ export interface AgentRunSnapshot {
   endedAt?: number;
   usage: AgentUsage;
   events: HarnessEvent[];
-  result?: HarnessResult;
+  session: string;
+  report?: string;
   error?: string;
 }
 
@@ -152,6 +153,18 @@ function questionNotice(id: string, question: string): string {
   return `Subagent ${id} is waiting for an answer.\nQuestion: ${question}\nAnswer it with subagent_message using id ${id}.`;
 }
 
+function endNotice(snapshot: AgentRunSnapshot): string {
+  if (snapshot.status === "stopped")
+    return `Subagent ${snapshot.id} was stopped.`;
+  if (snapshot.status === "failed")
+    return `Subagent ${snapshot.id} failed.\n${snapshot.error}${snapshot.report ? `\n${snapshot.report}` : ""}`;
+  return `Subagent ${snapshot.id} is idle.\n${snapshot.report ?? "(no output)"}`;
+}
+
+function live(snapshot: AgentRunSnapshot): boolean {
+  return snapshot.status === "running" || snapshot.status === "waiting";
+}
+
 function kind(profile: AgentProfile): AgentKind {
   return {
     name: profile.name,
@@ -166,12 +179,13 @@ export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
   const snapshots = new Map<string, AgentRunSnapshot>();
+  const profilesByRun = new Map<string, AgentProfile>();
   const active = new Map<string, HarnessRun>();
   const grants = new Map<string, DelegationGrant>();
   const questions = new Map<string, PendingQuestion>();
   const stateWaiters = new Map<string, Set<() => void>>();
   const stopping = new Set<string>();
-  const idleOwners = new Set<string>();
+  const settledOwners = new Set<string>();
   const pendingNotifications = new Map<string, Notice[]>();
   const waiters = new Map<string | undefined, Set<Waiter>>();
   const delivering = new Set<string>();
@@ -195,21 +209,51 @@ export async function createAgentRuntime(
     [...snapshots.values()].find(
       (snapshot) => snapshot.parentRunId === ownerRunId && snapshot.id === id,
     );
+  const children = (runId: string | undefined) =>
+    [...snapshots.values()].filter(
+      (snapshot) => snapshot.parentRunId === runId,
+    );
+  const notify = (snapshot: AgentRunSnapshot) => {
+    if (closing) return;
+    const notice: Notice = {
+      childRunId: snapshot.runId,
+      text: endNotice(snapshot),
+    };
+    if (snapshot.parentRunId) notifyOwner(snapshot.parentRunId, notice);
+    else notifyRoot(notice);
+  };
+  const releaseGrant = (runId: string) => {
+    grants.get(runId)?.revoke();
+    grants.delete(runId);
+  };
+  const markStopped = (snapshot: AgentRunSnapshot) => {
+    snapshot.status = "stopped";
+    snapshot.endedAt = Date.now();
+    for (const candidate of children(snapshot.runId)) stopTree(candidate.runId);
+    releaseGrant(snapshot.runId);
+    signalState(snapshot.runId);
+    emit();
+    notify(snapshot);
+  };
   const stopTree = (runId: string) => {
-    if (active.has(runId)) stopping.add(runId);
-    for (const snapshot of snapshots.values()) {
-      if (snapshot.parentRunId === runId) stopTree(snapshot.runId);
+    const snapshot = snapshots.get(runId);
+    if (!snapshot) return;
+    if (active.has(runId)) {
+      stopping.add(runId);
+      for (const candidate of children(runId)) stopTree(candidate.runId);
+      questions.get(runId)?.reject(new Error("Agent was stopped"));
+      questions.delete(runId);
+      active.get(runId)?.stop();
+      return;
     }
-    questions.get(runId)?.reject(new Error("Agent was cancelled"));
-    questions.delete(runId);
-    active.get(runId)?.stop();
+    if (snapshot.status === "idle") markStopped(snapshot);
   };
   const deliver = (ownerRunId: string) => {
     const run = active.get(ownerRunId);
     const notices = pendingNotifications.get(ownerRunId);
     if (!run || !notices?.length || stopping.has(ownerRunId) || closing) return;
     pendingNotifications.delete(ownerRunId);
-    idleOwners.delete(ownerRunId);
+    settledOwners.delete(ownerRunId);
     delivering.add(ownerRunId);
     void run
       .send(notices.map((notice) => notice.text).join("\n\n"))
@@ -258,15 +302,14 @@ export async function createAgentRuntime(
     const notices = pendingNotifications.get(ownerRunId) ?? [];
     notices.push(notice);
     pendingNotifications.set(ownerRunId, notices);
-    if (idleOwners.has(ownerRunId)) deliver(ownerRunId);
+    if (settledOwners.has(ownerRunId)) deliver(ownerRunId);
   };
   const turnSettled = (runId: string): boolean => {
     delivering.delete(runId);
-    idleOwners.add(runId);
+    settledOwners.add(runId);
     const notices = pendingNotifications.get(runId) ?? [];
-    for (const snapshot of snapshots.values()) {
-      if (snapshot.parentRunId !== runId || snapshot.question === undefined)
-        continue;
+    for (const snapshot of children(runId)) {
+      if (snapshot.question === undefined) continue;
       const text = questionNotice(snapshot.id, snapshot.question);
       if (!notices.some((notice) => notice.text === text))
         notices.push({ childRunId: snapshot.runId, text });
@@ -276,13 +319,8 @@ export async function createAgentRuntime(
       deliver(runId);
       return false;
     }
-    if (
-      [...snapshots.values()].some(
-        (run) => run.parentRunId === runId && active.has(run.runId),
-      )
-    )
-      return false;
-    idleOwners.delete(runId);
+    if (children(runId).some((run) => active.has(run.runId))) return false;
+    settledOwners.delete(runId);
     return true;
   };
   const profiles = () => loadAgentProfiles(options);
@@ -301,17 +339,13 @@ export async function createAgentRuntime(
     name: snapshot.agent,
     status: snapshot.status,
     ...(snapshot.question === undefined ? {} : { question: snapshot.question }),
-    ...(snapshot.result?.report ? { report: snapshot.result.report } : {}),
+    ...(snapshot.report === undefined ? {} : { report: snapshot.report }),
     ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
   });
   const inventory = async (ownerRunId?: string): Promise<AgentInventory> => ({
     kinds: (await allowedProfiles(ownerRunId)).map(kind),
-    runs: [...snapshots.values()]
-      .filter(
-        (snapshot) =>
-          snapshot.parentRunId === ownerRunId &&
-          (snapshot.status === "running" || snapshot.status === "waiting"),
-      )
+    runs: children(ownerRunId)
+      .filter((snapshot) => live(snapshot) || snapshot.status === "idle")
       .map(ownedRun),
   });
   const nextState = (runId: string) =>
@@ -326,16 +360,16 @@ export async function createAgentRuntime(
   ): Promise<OwnedAgentRun> => {
     const snapshot = child(ownerRunId, id);
     if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
-    const live = () =>
-      snapshot.status === "running" || snapshot.status === "waiting";
-    if (!live() || stopping.has(snapshot.runId))
-      throw new Error(`Subagent ${id} is not running`);
+    if (stopping.has(snapshot.runId))
+      throw new Error(`Subagent ${id} is stopping`);
+    if (snapshot.status === "idle") {
+      markStopped(snapshot);
+      return ownedRun(snapshot);
+    }
+    if (!live(snapshot))
+      throw new Error(`Subagent ${id} is ${snapshot.status}`);
     stopTree(snapshot.runId);
-    while (live()) await nextState(snapshot.runId);
-    if (snapshot.status !== "cancelled")
-      throw new Error(
-        `Subagent ${id} ${snapshot.status} before it was cancelled`,
-      );
+    while (live(snapshot)) await nextState(snapshot.runId);
     return ownedRun(snapshot);
   };
 
@@ -344,14 +378,12 @@ export async function createAgentRuntime(
     ids: string[] | undefined,
     signal: AbortSignal,
   ): Promise<string[]> => {
-    const children = [...snapshots.values()].filter(
-      (snapshot) => snapshot.parentRunId === ownerRunId,
-    );
+    const owned = children(ownerRunId);
     const targets =
       ids === undefined
-        ? children
+        ? owned
         : ids.map((id) => {
-            const found = children.find((snapshot) => snapshot.id === id);
+            const found = owned.find((snapshot) => snapshot.id === id);
             if (!found)
               throw new Error(`Unknown directly owned subagent ${id}`);
             return found;
@@ -370,7 +402,7 @@ export async function createAgentRuntime(
       else pendingNotifications.delete(ownerRunId);
       return ready.map((notice) => notice.text);
     }
-    if (!targets.some((snapshot) => snapshot.status === "running"))
+    if (!targets.some(live))
       throw new Error(
         `No subagent to wait for: ${targets
           .map((snapshot) => `${snapshot.id} is ${snapshot.status}`)
@@ -402,7 +434,7 @@ export async function createAgentRuntime(
     const snapshot = child(ownerRunId, id);
     if (!snapshot) throw new Error(`Unknown directly owned subagent ${id}`);
     if (stopping.has(snapshot.runId))
-      throw new Error(`Subagent ${id} is not running`);
+      throw new Error(`Subagent ${id} is stopping`);
     const pending = questions.get(snapshot.runId);
     if (pending) {
       questions.delete(snapshot.runId);
@@ -412,9 +444,16 @@ export async function createAgentRuntime(
       emit();
       return;
     }
+    if (snapshot.status === "idle") {
+      const profile = profilesByRun.get(snapshot.runId);
+      if (!profile) throw new Error(`Unknown subagent profile for ${id}`);
+      spawn(snapshot, profile, value, true);
+      emit();
+      return;
+    }
     const run = active.get(snapshot.runId);
     if (!run || snapshot.status !== "running")
-      throw new Error(`Subagent ${id} is not running`);
+      throw new Error(`Subagent ${id} is ${snapshot.status}`);
     await run.send(value);
   };
 
@@ -476,76 +515,112 @@ export async function createAgentRuntime(
     }
   };
 
-  const settle = async (snapshot: AgentRunSnapshot, run: HarnessRun) => {
-    try {
-      const result = await run.completion;
-      snapshot.result = result;
-      const deliveryFailure = deliveryFailures.get(snapshot.runId);
-      const unfinishedChild = [...snapshots.values()].some(
-        (candidate) =>
-          candidate.parentRunId === snapshot.runId &&
-          active.has(candidate.runId),
-      );
-      if (deliveryFailure) {
-        snapshot.status = "failed";
-        snapshot.error = deliveryFailure;
-      } else if (stopping.has(snapshot.runId) && !result.finished) {
-        snapshot.status = "cancelled";
-        snapshot.error = "Agent was cancelled";
-      } else if (result.signal !== null) {
-        snapshot.status = "failed";
-        snapshot.error = `Agent was terminated by ${result.signal}`;
-      } else if (result.exitCode !== 0) {
-        snapshot.status = "failed";
-        snapshot.error =
-          result.stderr.trim() || `Agent exited with code ${result.exitCode}`;
-      } else if (
-        !closing &&
-        (unfinishedChild ||
-          pendingNotifications.has(snapshot.runId) ||
-          delivering.has(snapshot.runId))
-      ) {
-        snapshot.status = "failed";
-        snapshot.error = "Agent exited before receiving child updates";
-      } else {
-        snapshot.status = "completed";
-      }
-    } catch (error) {
+  const settle = async (
+    snapshot: AgentRunSnapshot,
+    profile: AgentProfile,
+    run: HarnessRun,
+  ) => {
+    const runId = snapshot.runId;
+    const [completion] = await Promise.allSettled([run.completion]);
+    const fail = (error: string) => {
       snapshot.status = "failed";
-      snapshot.error = error instanceof Error ? error.message : String(error);
-    } finally {
-      snapshot.endedAt = Date.now();
-      active.delete(snapshot.runId);
-      stopping.delete(snapshot.runId);
-      idleOwners.delete(snapshot.runId);
-      pendingNotifications.delete(snapshot.runId);
-      delivering.delete(snapshot.runId);
-      deliveryFailures.delete(snapshot.runId);
-      questions
-        .get(snapshot.runId)
-        ?.reject(
-          new Error(snapshot.error ?? "Agent completed before answering"),
-        );
-      questions.delete(snapshot.runId);
-      snapshot.question = undefined;
-      for (const candidate of snapshots.values()) {
-        if (candidate.parentRunId === snapshot.runId) stopTree(candidate.runId);
-      }
-      grants.get(snapshot.runId)?.revoke();
-      grants.delete(snapshot.runId);
-      signalState(snapshot.runId);
-      emit();
-    }
-    const output = snapshot.error
-      ? `${snapshot.error}${snapshot.result?.report ? `\n${snapshot.result.report}` : ""}`
-      : snapshot.result?.report || "(no output)";
-    const notice: Notice = {
-      childRunId: snapshot.runId,
-      text: `Subagent ${snapshot.id} finished with status ${snapshot.status}.\n${output}`,
+      snapshot.error = error;
     };
-    if (closing) return;
-    if (snapshot.parentRunId) notifyOwner(snapshot.parentRunId, notice);
-    else notifyRoot(notice);
+    try {
+      snapshot.session = await harnessSession(profile.config, {
+        cwd: options.cwd,
+        runId,
+        sessionsDir: options.sessionsDir,
+      });
+      if (completion.status === "rejected") throw completion.reason;
+      const result = completion.value;
+      if (result.report) snapshot.report = result.report;
+      const deliveryFailure = deliveryFailures.get(runId);
+      if (deliveryFailure) fail(deliveryFailure);
+      else if (stopping.has(runId)) snapshot.status = "stopped";
+      else if (result.signal !== null)
+        fail(`Agent was terminated by ${result.signal}`);
+      else if (result.exitCode !== 0)
+        fail(
+          result.stderr.trim() || `Agent exited with code ${result.exitCode}`,
+        );
+      else snapshot.status = "idle";
+    } catch (error) {
+      if (stopping.has(runId)) snapshot.status = "stopped";
+      else fail(error instanceof Error ? error.message : String(error));
+    }
+    snapshot.endedAt = Date.now();
+    active.delete(runId);
+    stopping.delete(runId);
+    settledOwners.delete(runId);
+    pendingNotifications.delete(runId);
+    delivering.delete(runId);
+    deliveryFailures.delete(runId);
+    questions
+      .get(runId)
+      ?.reject(new Error(snapshot.error ?? "Agent ended before answering"));
+    questions.delete(runId);
+    snapshot.question = undefined;
+    if (snapshot.status !== "idle") {
+      for (const candidate of children(runId)) stopTree(candidate.runId);
+      releaseGrant(runId);
+    }
+    signalState(runId);
+    emit();
+    notify(snapshot);
+  };
+
+  const spawn = (
+    snapshot: AgentRunSnapshot,
+    profile: AgentProfile,
+    prompt: string,
+    resume: boolean,
+  ) => {
+    const runId = snapshot.runId;
+    const delegating = profile.delegates.length > 0;
+    const grant = delegating
+      ? (grants.get(runId) ?? host.grant(runId, profile.delegates))
+      : undefined;
+    let harnessRun: HarnessRun;
+    try {
+      harnessRun = spawnHarness(
+        {
+          cwd: options.cwd,
+          prompt,
+          runId,
+          resume,
+          sessionsDir: options.sessionsDir,
+        },
+        profile.config,
+        {
+          system: delegating
+            ? `${profile.system}\n\n${DELEGATION_GUIDANCE}`
+            : profile.system,
+          tools: profile.tools,
+          ...(grant ? { delegation: grant } : {}),
+          onTurnSettled: () => turnSettled(runId),
+        },
+        (event) => {
+          const current = snapshots.get(runId);
+          if (!current) return;
+          if (event.type === "usage") mergeUsage(current.usage, event.usage);
+          current.events.push(event);
+          emit();
+        },
+      );
+    } catch (error) {
+      grant?.revoke();
+      grants.delete(runId);
+      throw error;
+    }
+    if (grant) grants.set(runId, grant);
+    snapshot.pid = harnessRun.pid;
+    snapshot.status = "running";
+    snapshot.endedAt = undefined;
+    snapshot.report = undefined;
+    snapshot.error = undefined;
+    active.set(runId, harnessRun);
+    void settle(snapshot, profile, harnessRun);
   };
 
   const create = async (
@@ -573,40 +648,6 @@ export async function createAgentRuntime(
 
     const runId = randomUUID();
     await mkdir(options.sessionsDir, { recursive: true });
-    const delegating = profile.delegates.length > 0;
-    const grant = delegating ? host.grant(runId, profile.delegates) : undefined;
-    let harnessRun: HarnessRun;
-    try {
-      harnessRun = spawnHarness(
-        {
-          cwd: options.cwd,
-          prompt: request.prompt,
-          runId,
-          resume: false,
-          sessionsDir: options.sessionsDir,
-        },
-        profile.config,
-        {
-          system: delegating
-            ? `${profile.system}\n\n${DELEGATION_GUIDANCE}`
-            : profile.system,
-          tools: profile.tools,
-          ...(grant ? { delegation: grant } : {}),
-          onTurnSettled: () => turnSettled(runId),
-        },
-        (event) => {
-          const snapshot = snapshots.get(runId);
-          if (!snapshot) return;
-          if (event.type === "usage") mergeUsage(snapshot.usage, event.usage);
-          snapshot.events.push(event);
-          emit();
-        },
-      );
-    } catch (error) {
-      grant?.revoke();
-      throw error;
-    }
-
     const snapshot: AgentRunSnapshot = {
       runId,
       id: request.id,
@@ -615,7 +656,7 @@ export async function createAgentRuntime(
       harness: profile.config.harness,
       model: profile.config.model,
       thinking: profile.config.thinking,
-      pid: harnessRun.pid,
+      pid: 0,
       status: "running",
       startedAt: Date.now(),
       usage: {
@@ -625,12 +666,16 @@ export async function createAgentRuntime(
         cacheWriteTokens: 0,
       },
       events: [],
+      session: await harnessSession(profile.config, {
+        cwd: options.cwd,
+        runId,
+        sessionsDir: options.sessionsDir,
+      }),
     };
+    spawn(snapshot, profile, request.prompt, false);
     snapshots.set(runId, snapshot);
-    active.set(runId, harnessRun);
-    if (grant) grants.set(runId, grant);
+    profilesByRun.set(runId, profile);
     emit();
-    void settle(snapshot, harnessRun);
     return {
       ...snapshot,
       usage: { ...snapshot.usage },

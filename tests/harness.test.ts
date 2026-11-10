@@ -237,6 +237,20 @@ test("A delegating Pi child loads the bridge, the subagent tools, and the HTTP g
   ]);
 });
 
+test("A resumed Claude harness passes --resume with the run id", async () => {
+  const run = spawnHarness(
+    request("continue", true),
+    claudeConfig,
+    { system: "Implement carefully." },
+    () => undefined,
+  );
+  const result = await run.completion;
+  const invocation = stderrLines(result.stderr)[0] as { args: string[] };
+  assert.equal(result.report, "claude finished");
+  assert.deepEqual(invocation.args.slice(0, 3), ["--print", "--resume", runId]);
+  assert.equal(invocation.args.includes("--session-id"), false);
+});
+
 test("Claude emits messages, tool lifecycle, usage, and configured invocation", async () => {
   const events: HarnessEvent[] = [];
   const run = spawnHarness(

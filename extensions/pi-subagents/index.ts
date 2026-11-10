@@ -233,7 +233,7 @@ export default function piSubagents(pi: ExtensionAPI): void {
         case "subagent_stop": {
           const run = await runtime.stop(undefined, required(args, "id"));
           return {
-            ...text(`Stopped subagent ${run.id} with status ${run.status}`),
+            ...text(`Subagent ${run.id} is ${run.status}`),
             terminate: true,
           };
         }

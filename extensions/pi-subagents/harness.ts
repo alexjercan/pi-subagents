@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createClaudeAdapter } from "./harnesses/claude.ts";
-import { createPiAdapter } from "./harnesses/pi.ts";
+import { claudeSessionPath, createClaudeAdapter } from "./harnesses/claude.ts";
+import { createPiAdapter, piSessionPath } from "./harnesses/pi.ts";
 import type { AgentTool } from "./config.ts";
 import { spawnJsonlProcess } from "./process.ts";
 
@@ -87,6 +87,18 @@ export interface HarnessRun {
   stop(): void;
 }
 
+export async function harnessSession(
+  config: HarnessConfig,
+  request: Pick<HarnessRequest, "cwd" | "runId" | "sessionsDir">,
+): Promise<string> {
+  if (config.harness === "claude")
+    return claudeSessionPath(request.cwd, request.runId);
+  return (
+    (await piSessionPath(request.sessionsDir, request.runId)) ??
+    request.sessionsDir
+  );
+}
+
 export function spawnHarness(
   request: HarnessRequest,
   config: HarnessConfig,
@@ -158,10 +170,13 @@ export function spawnHarness(
     completion: Promise.all([initialized, processRun.completion]).then(
       ([, result]) => {
         if (failure) throw failure;
-        if (turnActive && result.signal === null && !stopRequested) {
+        if (!finished && result.signal === null && !stopRequested) {
           const stderr = result.stderr.trim();
+          const phase = turnActive
+            ? "before reporting completion"
+            : "while waiting for child updates";
           throw new Error(
-            `Harness exited with code ${result.exitCode} before reporting completion${stderr ? `\n${stderr}` : ""}`,
+            `Harness exited with code ${result.exitCode} ${phase}${stderr ? `\n${stderr}` : ""}`,
           );
         }
         return { ...result, finished, report };

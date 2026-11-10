@@ -31,7 +31,7 @@ function run(
     model: value.model ?? "haiku",
     thinking: value.thinking ?? "medium",
     pid: value.pid ?? 100,
-    status: value.status ?? "completed",
+    status: value.status ?? "idle",
     startedAt: value.startedAt ?? 1000,
     endedAt: value.endedAt,
     usage: value.usage ?? {
@@ -43,7 +43,8 @@ function run(
       costUsd: 0.12,
     },
     events: value.events ?? [],
-    result: value.result,
+    session: value.session ?? "session.jsonl",
+    report: value.report,
     error: value.error,
   };
 }
@@ -88,7 +89,7 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
   ];
   const lines = renderAgentTree(runs, 120, theme, 61000);
   assert.equal(lines.length, 4);
-  assert.match(lines[0] ?? "", /total: 3  completed: 2/);
+  assert.match(lines[0] ?? "", /total: 3  ended: 2/);
   assert.match(
     lines[1] ?? "",
     /worker:worker claude\/opus think:high 01:00 ctx 1.6k \| in 1.0k.*\$0.12/,
@@ -103,20 +104,20 @@ test("Agent tree renders hierarchy, metadata, usage, and start order", () => {
 
 test("Active agent tree retains cumulative session totals", () => {
   const runs = [
-    run({ id: "completed", agent: "scout" }),
+    run({ id: "idle", agent: "scout" }),
     run({ id: "failed", agent: "review", status: "failed" }),
-    run({ id: "cancelled", agent: "worker", status: "cancelled" }),
+    run({ id: "stopped", agent: "worker", status: "stopped" }),
     run({ id: "active", agent: "scout", status: "running" }),
   ];
   const lines = renderAgentTree(runs, 120, theme, 5000, "active");
   assert.match(
     lines[0] ?? "",
-    /total: 4  completed: 3  tokens: 6.4k  cost: \$0.48/,
+    /total: 4  ended: 3  tokens: 6.4k  cost: \$0.48/,
   );
   assert.ok(lines.some((line) => line.includes("scout:active")));
-  assert.ok(lines.every((line) => !line.includes("scout:completed")));
+  assert.ok(lines.every((line) => !line.includes("scout:idle")));
   assert.ok(lines.every((line) => !line.includes("review:failed")));
-  assert.ok(lines.every((line) => !line.includes("worker:cancelled")));
+  assert.ok(lines.every((line) => !line.includes("worker:stopped")));
 });
 
 test("Agent tree keeps three recent one-line activities", () => {
@@ -153,7 +154,7 @@ test("Agent tree keeps three recent one-line activities", () => {
   assert.ok(lines.every((line) => !line.includes("first output")));
 });
 
-test("Active tree includes completed children only under running roots", () => {
+test("Active tree includes idle children only under running roots", () => {
   const runs = [
     run({ id: "old", agent: "review" }),
     run({ id: "worker", agent: "worker", status: "running" }),
@@ -165,7 +166,7 @@ test("Active tree includes completed children only under running roots", () => {
   );
   assert.deepEqual(
     activeAgentTree(
-      runs.map((candidate) => ({ ...candidate, status: "completed" })),
+      runs.map((candidate) => ({ ...candidate, status: "idle" })),
     ),
     [],
   );
