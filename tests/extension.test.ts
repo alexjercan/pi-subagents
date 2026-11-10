@@ -6,15 +6,37 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSubagents from "../extensions/pi-subagents/index.ts";
+import type { SubagentLogEntry } from "../extensions/pi-subagents/runtime.ts";
 
 interface TestContext {
   cwd: string;
   mode: "tui";
+  hasUI: boolean;
   isProjectTrusted(): boolean;
   ui: {
     setWidget(name: string, value: unknown): void;
     input(title: string, prompt: string): Promise<string | undefined>;
+    notify(message: string, type?: string): void;
+    select(title: string, options: string[]): Promise<string | undefined>;
+    custom<T>(factory: TestCustomFactory<T>): Promise<T>;
   };
+}
+
+interface TestCustomComponent {
+  render(width: number): string[];
+  handleInput(data: string): void;
+}
+
+type TestCustomFactory<T> = (
+  tui: { requestRender(): void },
+  theme: TestTheme,
+  keybindings: { matches(data: string, id: string): boolean },
+  done: (result: T) => void,
+) => TestCustomComponent;
+
+interface RegisteredCommand {
+  description?: string;
+  handler(args: string, ctx: TestContext): Promise<void>;
 }
 
 interface TestToolResult {
@@ -60,11 +82,12 @@ async function until(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
-test("Delegated Pi children leave subagent tools to the bridge", () => {
-  const previousUrl = process.env.PI_SUBAGENTS_MCP_URL;
-  process.env.PI_SUBAGENTS_MCP_URL = "http://127.0.0.1:1/mcp";
+test("Pi children load neither the runtime, the tools, nor the commands", () => {
+  const previousRunId = process.env.PI_SUBAGENTS_RUN_ID;
+  process.env.PI_SUBAGENTS_RUN_ID = "child-run";
   let handlers = 0;
   let tools = 0;
+  let commands = 0;
   try {
     piSubagents({
       on() {
@@ -73,13 +96,17 @@ test("Delegated Pi children leave subagent tools to the bridge", () => {
       registerTool() {
         tools += 1;
       },
+      registerCommand() {
+        commands += 1;
+      },
     } as unknown as ExtensionAPI);
   } finally {
-    if (previousUrl === undefined) delete process.env.PI_SUBAGENTS_MCP_URL;
-    else process.env.PI_SUBAGENTS_MCP_URL = previousUrl;
+    if (previousRunId === undefined) delete process.env.PI_SUBAGENTS_RUN_ID;
+    else process.env.PI_SUBAGENTS_RUN_ID = previousRunId;
   }
   assert.equal(handlers, 0);
   assert.equal(tools, 0);
+  assert.equal(commands, 0);
 });
 
 test("Root delegation wakes on completion without persisting agent event histories", async () => {
@@ -122,6 +149,8 @@ process.stdin.once("data", (chunk) => {
     (event: unknown, context: TestContext) => unknown
   >();
   const tools = new Map<string, RegisteredTool>();
+  const commands = new Map<string, RegisteredCommand>();
+  const entries: Array<{ type: string; entry: SubagentLogEntry }> = [];
   const messages: Array<{
     message: Record<string, unknown>;
     options: unknown;
@@ -136,6 +165,12 @@ process.stdin.once("data", (chunk) => {
     registerTool(value: RegisteredTool) {
       tools.set(value.name, value);
     },
+    registerCommand(name: string, value: RegisteredCommand) {
+      commands.set(name, value);
+    },
+    appendEntry(type: string, entry: SubagentLogEntry) {
+      entries.push({ type, entry });
+    },
     sendMessage(message: Record<string, unknown>, options: unknown) {
       messages.push({ message, options });
     },
@@ -143,11 +178,30 @@ process.stdin.once("data", (chunk) => {
   const widgets: unknown[] = [];
   const widgetRenders: string[][] = [];
   const inputs: Array<{ title: string; placeholder: string }> = [];
+  const notices: Array<{ message: string; type?: string }> = [];
+  const customRenders: string[][] = [];
   const context: TestContext = {
     cwd: project,
     mode: "tui",
+    hasUI: true,
     isProjectTrusted: () => true,
     ui: {
+      notify(message, type) {
+        notices.push({ message, type });
+      },
+      select: async () => undefined,
+      async custom(factory) {
+        return await new Promise((resolve) => {
+          const component = factory(
+            { requestRender() {} },
+            theme,
+            { matches: (data, id) => data === id },
+            resolve,
+          );
+          customRenders.push(component.render(120));
+          component.handleInput("tui.select.cancel");
+        });
+      },
       setWidget(_name, value) {
         widgets.push(value);
         if (typeof value === "function")
@@ -170,6 +224,13 @@ process.stdin.once("data", (chunk) => {
       "subagent_message",
       "subagent_stop",
       "subagent_wait",
+    ]);
+    assert.deepEqual([...commands.keys()].sort(), [
+      "subagent-create",
+      "subagent-list",
+      "subagent-message",
+      "subagent-show",
+      "subagent-stop",
     ]);
     await handlers.get("session_start")?.({}, context);
     assert.ok(
@@ -316,6 +377,93 @@ process.stdin.once("data", (chunk) => {
       assert.ok(!JSON.stringify(result.details ?? {}).includes('"events"'));
     }
     assert.deepEqual(inputs, []);
+
+    const fastEntries = entries.filter(
+      ({ type, entry }) => type === "pi-subagents" && entry.id === "fast",
+    );
+    assert.deepEqual(
+      fastEntries.map(({ entry }) => entry.event),
+      ["create", "idle"],
+    );
+    const [created, idle] = fastEntries.map(({ entry }) => entry);
+    assert.ok(created && idle);
+    assert.equal(created.text, "Fast");
+    assert.ok((created.pid ?? 0) > 0);
+    assert.equal(idle.text, "Fast done");
+    assert.equal(idle.runId, created.runId);
+    assert.deepEqual(idle.usage, {
+      inputTokens: 4,
+      outputTokens: 2,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      contextTokens: 5,
+      costUsd: 0.01,
+    });
+    assert.equal(
+      idle.session,
+      join(
+        directory,
+        ".claude",
+        "projects",
+        project.replace(/[^A-Za-z0-9]/g, "-"),
+        `${idle.runId}.jsonl`,
+      ),
+    );
+    assert.deepEqual(
+      entries
+        .filter(({ entry }) => entry.id === "stopped")
+        .map(({ entry }) => entry.event),
+      ["create", "stop"],
+    );
+
+    await commands
+      .get("subagent-create")
+      ?.handler("scout created Slow prompt text", context);
+    assert.deepEqual(notices.at(-1), {
+      message: "Created subagent created using scout",
+      type: "info",
+    });
+    assert.equal(
+      entries.filter(({ entry }) => entry.id === "created")[0]?.entry.text,
+      "Slow prompt text",
+    );
+    await commands.get("subagent-list")?.handler("", context);
+    const listing = notices.at(-1)?.message.split("\n") ?? [];
+    assert.ok(
+      listing.some((line) =>
+        /^\[>\] created \(scout\) \[running\] 00:0\d/.test(line),
+      ),
+    );
+    assert.ok(
+      listing.some((line) =>
+        /^\[ok\] fast \(scout\) \[idle\] 00:0\d .* Fast done$/.test(line),
+      ),
+    );
+    await commands.get("subagent-show")?.handler("created", context);
+    const shown = customRenders.at(-1) ?? [];
+    assert.ok(
+      shown.some((line) => line.startsWith("[>] created (scout) [running]")),
+    );
+    assert.ok(shown.includes("session:"));
+    assert.ok(shown.some((line) => line.endsWith(".jsonl")));
+    assert.ok(shown.at(-1)?.startsWith("lines 1-13 of 13"));
+    assert.ok(shown.some((line) => /^pid: [1-9]\d*$/.test(line)));
+    await commands.get("subagent-show")?.handler("missing", context);
+    assert.deepEqual(notices.at(-1), {
+      message: "Unknown root subagent missing",
+      type: "error",
+    });
+    await commands.get("subagent-stop")?.handler("created", context);
+    assert.deepEqual(notices.at(-1), {
+      message: "Subagent created is stopped",
+      type: "info",
+    });
+    await commands.get("subagent-create")?.handler("scout", context);
+    assert.deepEqual(notices.at(-1), {
+      message: "Usage: /subagent-create <name> <id> <prompt>",
+      type: "error",
+    });
+
     await handlers.get("session_shutdown")?.({}, context);
     assert.equal(widgets.at(-1), undefined);
   } finally {

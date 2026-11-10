@@ -6,6 +6,9 @@ import type { AgentRunSnapshot } from "../extensions/pi-subagents/runtime.ts";
 import {
   activeAgentTree,
   renderAgentTree,
+  renderRunDetails,
+  renderRunLine,
+  renderViewport,
   type AgentTreeTheme,
 } from "../extensions/pi-subagents/ui.ts";
 
@@ -32,6 +35,7 @@ function run(
     thinking: value.thinking ?? "medium",
     pid: value.pid ?? 100,
     status: value.status ?? "idle",
+    question: value.question,
     startedAt: value.startedAt ?? 1000,
     endedAt: value.endedAt,
     usage: value.usage ?? {
@@ -170,4 +174,59 @@ test("Active tree includes idle children only under running roots", () => {
     ),
     [],
   );
+});
+
+test("Run line and details render status, elapsed, usage, session, and report", () => {
+  const idle = run({
+    id: "scout",
+    agent: "scout",
+    pid: 4242,
+    startedAt: 1000,
+    endedAt: 61000,
+    session: "/sessions/scout.jsonl",
+    report: "First line\nSecond line",
+    events: [message("looking")],
+  });
+  assert.equal(
+    renderRunLine(idle, theme, 90000),
+    "[ok] scout (scout) [idle] 01:00 ctx 1.6k | in 1.0k | out 200 | cache 400 | $0.12 First line",
+  );
+  const waiting = run({
+    id: "worker",
+    agent: "worker",
+    status: "waiting",
+    question: "Which branch?",
+    startedAt: 1000,
+  });
+  assert.equal(
+    renderRunLine(waiting, theme, 4000),
+    "[?] worker (worker) [waiting] 00:03 ctx 1.6k | in 1.0k | out 200 | cache 400 | $0.12",
+  );
+  const details = renderRunDetails(idle, theme, 90000).split("\n");
+  assert.deepEqual(details.slice(0, 2), [
+    "[ok] scout (scout) [idle]",
+    "harness: claude/haiku think:medium",
+  ]);
+  assert.ok(details.includes("pid: 4242"));
+  assert.ok(details.includes("session: /sessions/scout.jsonl"));
+  assert.ok(details.includes('   "looking"'));
+  assert.deepEqual(details.slice(-3), ["report:", "First line", "Second line"]);
+  assert.ok(
+    renderRunDetails(waiting, theme, 4000).includes("question: Which branch?"),
+  );
+});
+
+test("Viewport clamps the top line and wraps long lines", () => {
+  const text = ["a", "b".repeat(12), "c", "d"].join("\n");
+  assert.deepEqual(renderViewport(text, 0, 2, 6), {
+    lines: ["a", "bbbbbb"],
+    top: 0,
+    total: 5,
+  });
+  assert.deepEqual(renderViewport(text, 99, 2, 6), {
+    lines: ["c", "d"],
+    top: 3,
+    total: 5,
+  });
+  assert.equal(renderViewport(text, -5, 2, 6).top, 0);
 });

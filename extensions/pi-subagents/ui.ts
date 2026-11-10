@@ -1,4 +1,4 @@
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { record, string, textContent } from "./protocol.ts";
 import type { AgentRunSnapshot, AgentUsage } from "./runtime.ts";
 
@@ -11,6 +11,16 @@ export interface AgentTreeTheme {
   warning(text: string): string;
   bold(text: string): string;
 }
+
+export const PLAIN_THEME: AgentTreeTheme = {
+  accent: (text) => text,
+  dim: (text) => text,
+  error: (text) => text,
+  muted: (text) => text,
+  success: (text) => text,
+  warning: (text) => text,
+  bold: (text) => text,
+};
 
 interface Activity {
   id?: string;
@@ -153,6 +163,79 @@ function status(run: AgentRunSnapshot, theme: AgentTreeTheme): string {
   return theme.muted("[-]");
 }
 
+function activityMarker(activity: Activity, theme: AgentTreeTheme): string {
+  if (activity.status === "running") return theme.warning("[..]");
+  if (activity.status === "done") return theme.success("[ok]");
+  if (activity.status === "failed") return theme.error("[x]");
+  return "";
+}
+
+function firstLine(value: string): string {
+  return value.split("\n").find((line) => line.trim().length > 0) ?? "";
+}
+
+export function renderRunLine(
+  run: AgentRunSnapshot,
+  theme: AgentTreeTheme,
+  now: number,
+): string {
+  const elapsed = formatDuration(run.startedAt, run.endedAt ?? now);
+  const report =
+    run.status === "idle" && run.report
+      ? ` ${theme.dim(compact(firstLine(run.report)))}`
+      : "";
+  return `${status(run, theme)} ${theme.accent(theme.bold(run.id))} ${theme.muted(`(${run.agent})`)} ${theme.dim(`[${run.status}] ${elapsed}`)} ${theme.dim(formatUsage(run.usage))}${report}`;
+}
+
+export function renderRunDetails(
+  run: AgentRunSnapshot,
+  theme: AgentTreeTheme,
+  now: number,
+): string {
+  const recent = activities(run).slice(-5);
+  const lines = [
+    `${status(run, theme)} ${theme.accent(theme.bold(run.id))} ${theme.muted(`(${run.agent})`)} ${theme.dim(`[${run.status}]`)}`,
+    `${theme.bold("harness:")} ${run.harness}/${run.model} think:${run.thinking}`,
+    `${theme.bold("run:")} ${run.runId}${run.parentRunId ? ` ${theme.dim(`owner ${run.parentRunId}`)}` : ""}`,
+    `${theme.bold("pid:")} ${run.pid}`,
+    `${theme.bold("started:")} ${new Date(run.startedAt).toISOString()} ${theme.dim(`elapsed ${formatDuration(run.startedAt, run.endedAt ?? now)}`)}`,
+    `${theme.bold("session:")} ${run.session}`,
+    `${theme.bold("usage:")} ${formatUsage(run.usage)}`,
+  ];
+  if (run.question !== undefined)
+    lines.push(`${theme.bold("question:")} ${run.question}`);
+  if (run.error !== undefined)
+    lines.push(`${theme.bold("error:")} ${theme.error(run.error)}`);
+  lines.push(theme.bold("events:"));
+  if (recent.length === 0) lines.push(`  ${theme.dim("(none)")}`);
+  for (const activity of recent)
+    lines.push(
+      `  ${activityMarker(activity, theme)} ${theme.dim(activity.text)}`,
+    );
+  lines.push(theme.bold("report:"));
+  lines.push(
+    run.report === undefined ? `  ${theme.dim("(none)")}` : run.report,
+  );
+  return lines.join("\n");
+}
+
+export function renderViewport(
+  text: string,
+  top: number,
+  height: number,
+  width: number,
+): { lines: string[]; top: number; total: number } {
+  const wrapped = text
+    .split("\n")
+    .flatMap((line) => (line === "" ? [""] : wrapTextWithAnsi(line, width)));
+  const clamped = Math.max(0, Math.min(top, wrapped.length - height));
+  return {
+    lines: wrapped.slice(clamped, clamped + height),
+    top: clamped,
+    total: wrapped.length,
+  };
+}
+
 export function agentSubtree(
   runs: AgentRunSnapshot[],
   rootId: string,
@@ -257,15 +340,9 @@ export function renderAgentTree(
         `${continuation}|  ${theme.muted(`... ${omitted} earlier events`)}`,
       );
     for (const activity of recent.slice(-3)) {
-      const marker =
-        activity.status === "running"
-          ? theme.warning("[..]")
-          : activity.status === "done"
-            ? theme.success("[ok]")
-            : activity.status === "failed"
-              ? theme.error("[x]")
-              : "";
-      lines.push(`${continuation}|  ${marker} ${theme.dim(activity.text)}`);
+      lines.push(
+        `${continuation}|  ${activityMarker(activity, theme)} ${theme.dim(activity.text)}`,
+      );
     }
     const children = byParent.get(run.runId) ?? [];
     children.forEach((child, index) =>

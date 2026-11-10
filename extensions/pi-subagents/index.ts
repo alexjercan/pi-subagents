@@ -1,6 +1,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  Theme,
+} from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
   createAgentRuntime,
@@ -10,7 +14,17 @@ import {
 } from "./runtime.ts";
 import { registerPiTools, type ToolRenderers } from "./pi-tools.ts";
 import { OWNER_TOOLS, type ToolResult } from "./tools.ts";
-import { activeAgentTree, renderAgentTree, type AgentTreeTheme } from "./ui.ts";
+import {
+  activeAgentTree,
+  PLAIN_THEME,
+  renderAgentTree,
+  renderRunDetails,
+  renderRunLine,
+  renderViewport,
+  type AgentTreeTheme,
+} from "./ui.ts";
+
+const DETAILS_HEIGHT = 20;
 
 interface SubagentDetails {
   run?: Pick<AgentRunSnapshot, "id" | "agent">;
@@ -49,6 +63,35 @@ function required(args: Record<string, unknown>, name: string): string {
   if (typeof value !== "string" || value.length === 0)
     throw new Error(`${name} must be a non-empty string`);
   return value;
+}
+
+function words(args: string, count: number): string[] {
+  const values: string[] = [];
+  let rest = args.trim();
+  while (values.length < count && rest.length > 0) {
+    const end = rest.search(/\s/);
+    if (end === -1) {
+      values.push(rest);
+      rest = "";
+      break;
+    }
+    values.push(rest.slice(0, end));
+    rest = rest.slice(end).trimStart();
+  }
+  if (rest.length > 0) values.push(rest);
+  return values;
+}
+
+function rootRuns(runtime: AgentRuntime): AgentRunSnapshot[] {
+  return runtime.list().filter((run) => run.parentRunId === undefined);
+}
+
+function selectable(run: AgentRunSnapshot): boolean {
+  return (
+    run.status === "running" ||
+    run.status === "waiting" ||
+    run.status === "idle"
+  );
 }
 
 function renderMuted(
@@ -124,7 +167,7 @@ const renderers: ToolRenderers = {
 };
 
 export default function piSubagents(pi: ExtensionAPI): void {
-  if (process.env.PI_SUBAGENTS_MCP_URL) return;
+  if (process.env.PI_SUBAGENTS_RUN_ID) return;
 
   let runtime: AgentRuntime | undefined;
   let widgetRuns: AgentRunSnapshot[] = [];
@@ -184,8 +227,157 @@ export default function piSubagents(pi: ExtensionAPI): void {
       onRootMessage(message) {
         wakeOwner(message);
       },
+      onEntry(entry) {
+        pi.appendEntry("pi-subagents", entry);
+      },
     });
   });
+
+  const fail = (ctx: ExtensionCommandContext, error: unknown) =>
+    ctx.ui.notify(
+      error instanceof Error ? error.message : String(error),
+      "error",
+    );
+  const requireRuntime = (): AgentRuntime => {
+    if (!runtime) throw new Error("Subagent runtime is not running");
+    return runtime;
+  };
+  const chooseId = async (
+    ctx: ExtensionCommandContext,
+    title: string,
+  ): Promise<string | undefined> => {
+    if (!ctx.hasUI) throw new Error("Subagent id is required");
+    const runs = rootRuns(requireRuntime()).filter(selectable);
+    if (runs.length === 0) throw new Error("No root subagents");
+    const labels = runs.map(
+      (run) => `${run.id} (${run.agent}) [${run.status}]`,
+    );
+    const chosen = await ctx.ui.select(title, labels);
+    if (chosen === undefined) return undefined;
+    return runs[labels.indexOf(chosen)]?.id;
+  };
+  const command = (
+    name: string,
+    description: string,
+    handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>,
+  ) =>
+    pi.registerCommand(name, {
+      description,
+      async handler(args, ctx) {
+        try {
+          await handler(args, ctx);
+        } catch (error) {
+          fail(ctx, error);
+        }
+      },
+    });
+
+  command("subagent-list", "List root subagents", async (_args, ctx) => {
+    const runs = rootRuns(requireRuntime());
+    if (runs.length === 0) {
+      ctx.ui.notify("No root subagents", "info");
+      return;
+    }
+    const now = Date.now();
+    ctx.ui.notify(
+      runs.map((run) => renderRunLine(run, PLAIN_THEME, now)).join("\n"),
+      "info",
+    );
+  });
+
+  command(
+    "subagent-show",
+    "Show one root subagent: /subagent-show <id>",
+    async (args, ctx) => {
+      const [requested] = words(args, 1);
+      const id = requested ?? (await chooseId(ctx, "Show subagent"));
+      if (id === undefined) return;
+      const run = rootRuns(requireRuntime()).find(
+        (candidate) => candidate.id === id,
+      );
+      if (!run) throw new Error(`Unknown root subagent ${id}`);
+      const now = Date.now();
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(renderRunDetails(run, PLAIN_THEME, now), "info");
+        return;
+      }
+      await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+        const details = renderRunDetails(run, colors(theme), now);
+        let top = 0;
+        return {
+          render(width) {
+            const view = renderViewport(details, top, DETAILS_HEIGHT, width);
+            top = view.top;
+            const end = Math.min(view.top + DETAILS_HEIGHT, view.total);
+            return [
+              ...view.lines,
+              theme.fg(
+                "dim",
+                `lines ${view.total === 0 ? 0 : view.top + 1}-${end} of ${view.total}  up/down scroll, enter or escape closes`,
+              ),
+            ];
+          },
+          handleInput(data: string) {
+            if (keybindings.matches(data, "tui.select.up")) top -= 1;
+            else if (keybindings.matches(data, "tui.select.down")) top += 1;
+            else if (keybindings.matches(data, "tui.select.pageUp"))
+              top -= DETAILS_HEIGHT;
+            else if (keybindings.matches(data, "tui.select.pageDown"))
+              top += DETAILS_HEIGHT;
+            else if (
+              keybindings.matches(data, "tui.select.confirm") ||
+              keybindings.matches(data, "tui.select.cancel")
+            ) {
+              done();
+              return;
+            } else return;
+            tui.requestRender();
+          },
+          invalidate() {},
+        };
+      });
+    },
+  );
+
+  command(
+    "subagent-create",
+    "Create a root subagent: /subagent-create <name> <id> <prompt>",
+    async (args, ctx) => {
+      const [name, id, prompt] = words(args, 2);
+      if (!name || !id || !prompt)
+        throw new Error("Usage: /subagent-create <name> <id> <prompt>");
+      const run = await requireRuntime().create({ id, name, prompt });
+      ctx.ui.notify(`Created subagent ${run.id} using ${run.agent}`, "info");
+    },
+  );
+
+  command(
+    "subagent-message",
+    "Message a root subagent: /subagent-message <id> <text>",
+    async (args, ctx) => {
+      const [requested, given] = words(args, 1);
+      const id = requested ?? (await chooseId(ctx, "Message subagent"));
+      if (id === undefined) return;
+      const text =
+        given ?? (ctx.hasUI ? await ctx.ui.input(`Message to ${id}`) : "");
+      if (text === undefined) return;
+      if (!text) throw new Error("Usage: /subagent-message <id> <text>");
+      await requireRuntime().message(undefined, id, text);
+      ctx.ui.notify(`Message sent to ${id}`, "info");
+    },
+  );
+
+  command(
+    "subagent-stop",
+    "Stop a root subagent: /subagent-stop <id>",
+    async (args, ctx) => {
+      const [requested] = words(args, 1);
+      const id = requested ?? (await chooseId(ctx, "Stop subagent"));
+      if (id === undefined) return;
+      const run = await requireRuntime().stop(undefined, id);
+      ctx.ui.notify(`Subagent ${run.id} is ${run.status}`, "info");
+    },
+  );
 
   pi.on("session_shutdown", async () => {
     const current = runtime;

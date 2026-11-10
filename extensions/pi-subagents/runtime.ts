@@ -105,11 +105,38 @@ export interface AgentRuntime {
   close(): Promise<void>;
 }
 
+export type SubagentLogEvent =
+  | "create"
+  | "resume"
+  | "message"
+  | "ask"
+  | "answer"
+  | "wait"
+  | "stop"
+  | "idle"
+  | "failed";
+
+export interface SubagentLogEntry {
+  at: number;
+  runId: string;
+  id: string;
+  parentRunId?: string;
+  agent: string;
+  harness: "pi" | "claude";
+  model: string;
+  event: SubagentLogEvent;
+  text?: string;
+  usage?: AgentUsage;
+  pid?: number;
+  session?: string;
+}
+
 export interface CreateAgentRuntimeOptions extends LoadAgentProfilesOptions {
   sessionsDir: string;
   onUpdate?: (runs: AgentRunSnapshot[]) => void;
   onRootMessage?: (message: string) => void | Promise<void>;
   onRootQuestion?: (id: string, prompt: string) => void | Promise<void>;
+  onEntry?: (entry: SubagentLogEntry) => void;
 }
 
 interface PendingQuestion {
@@ -200,6 +227,35 @@ export async function createAgentRuntime(
       events: [...snapshot.events],
     }));
   const emit = () => options.onUpdate?.(list());
+  const log = (
+    snapshot: AgentRunSnapshot,
+    event: SubagentLogEvent,
+    text?: string,
+  ) => {
+    const onEntry = options.onEntry;
+    if (!onEntry) return;
+    const entry: SubagentLogEntry = {
+      at: Date.now(),
+      runId: snapshot.runId,
+      id: snapshot.id,
+      ...(snapshot.parentRunId === undefined
+        ? {}
+        : { parentRunId: snapshot.parentRunId }),
+      agent: snapshot.agent,
+      harness: snapshot.harness,
+      model: snapshot.model,
+      event,
+      ...(text === undefined ? {} : { text }),
+      usage: { ...snapshot.usage },
+      pid: snapshot.pid,
+      session: snapshot.session,
+    };
+    try {
+      onEntry(entry);
+    } catch {
+      return;
+    }
+  };
   const signalState = (runId: string) => {
     const waiters = stateWaiters.get(runId);
     stateWaiters.delete(runId);
@@ -232,6 +288,7 @@ export async function createAgentRuntime(
     for (const candidate of children(snapshot.runId)) stopTree(candidate.runId);
     releaseGrant(snapshot.runId);
     signalState(snapshot.runId);
+    log(snapshot, "stop");
     emit();
     notify(snapshot);
   };
@@ -394,13 +451,19 @@ export async function createAgentRuntime(
     const ready = pending.filter((notice) =>
       childRunIds.has(notice.childRunId),
     );
+    const logWait = (notices: string[]) => {
+      const owner =
+        ownerRunId === undefined ? undefined : snapshots.get(ownerRunId);
+      if (owner) log(owner, "wait", notices.join("\n\n"));
+      return notices;
+    };
     if (ready.length > 0 && ownerRunId !== undefined) {
       const kept = pending.filter(
         (notice) => !childRunIds.has(notice.childRunId),
       );
       if (kept.length > 0) pendingNotifications.set(ownerRunId, kept);
       else pendingNotifications.delete(ownerRunId);
-      return ready.map((notice) => notice.text);
+      return logWait(ready.map((notice) => notice.text));
     }
     if (!targets.some(live))
       throw new Error(
@@ -409,7 +472,7 @@ export async function createAgentRuntime(
           .join(", ")}`,
       );
     if (signal.aborted) throw new Error("Wait was cancelled");
-    return await new Promise<string[]>((resolve, reject) => {
+    const notices = await new Promise<string[]>((resolve, reject) => {
       const waiter: Waiter = { childRunIds, resolve, reject };
       const set = waiters.get(ownerRunId) ?? new Set();
       set.add(waiter);
@@ -424,6 +487,7 @@ export async function createAgentRuntime(
         { once: true },
       );
     });
+    return logWait(notices);
   };
 
   const message = async (
@@ -441,6 +505,7 @@ export async function createAgentRuntime(
       snapshot.question = undefined;
       snapshot.status = "running";
       pending.resolve(value);
+      log(snapshot, "answer", value);
       emit();
       return;
     }
@@ -448,6 +513,7 @@ export async function createAgentRuntime(
       const profile = profilesByRun.get(snapshot.runId);
       if (!profile) throw new Error(`Unknown subagent profile for ${id}`);
       spawn(snapshot, profile, value, true);
+      log(snapshot, "resume", value);
       emit();
       return;
     }
@@ -455,6 +521,7 @@ export async function createAgentRuntime(
     if (!run || snapshot.status !== "running")
       throw new Error(`Subagent ${id} is ${snapshot.status}`);
     await run.send(value);
+    log(snapshot, "message", value);
   };
 
   const ask = async (
@@ -470,6 +537,7 @@ export async function createAgentRuntime(
     snapshot.status = "waiting";
     snapshot.question = prompt;
     signalState(runId);
+    log(snapshot, "ask", prompt);
     emit();
     let rejectQuestion: (error: Error) => void = () => undefined;
     const answer = new Promise<string>((resolve, reject) => {
@@ -566,6 +634,10 @@ export async function createAgentRuntime(
       releaseGrant(runId);
     }
     signalState(runId);
+    if (snapshot.status === "stopped") log(snapshot, "stop");
+    else if (snapshot.status === "failed")
+      log(snapshot, "failed", snapshot.error);
+    else log(snapshot, "idle", snapshot.report);
     emit();
     notify(snapshot);
   };
@@ -675,6 +747,7 @@ export async function createAgentRuntime(
     spawn(snapshot, profile, request.prompt, false);
     snapshots.set(runId, snapshot);
     profilesByRun.set(runId, profile);
+    log(snapshot, "create", request.prompt);
     emit();
     return {
       ...snapshot,

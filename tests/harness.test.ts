@@ -81,7 +81,7 @@ function delegation(
 const fixture = `#!/usr/bin/env node
 const harness = process.argv[1].split("/").at(-1);
 const args = process.argv.slice(2);
-process.stderr.write(JSON.stringify({ args, disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, waitCeiling: process.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, noPrefix: process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX }) + "\\n");
+process.stderr.write(JSON.stringify({ args, disableBackgroundTasks: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, waitCeiling: process.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, noPrefix: process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX, childRunId: process.env.PI_SUBAGENTS_RUN_ID }) + "\\n");
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -462,9 +462,13 @@ test("A profile without delegates launches Claude without the SDK server and Pi 
     () => undefined,
   );
   const piResult = await pi.completion;
-  const piInvocation = stderrLines(piResult.stderr)[0] as { args: string[] };
+  const piInvocation = stderrLines(piResult.stderr)[0] as {
+    args: string[];
+    childRunId?: string;
+  };
   assert.equal(piInvocation.args.includes("--extension"), false);
   assert.deepEqual(piInvocation.args.slice(-2), ["--tools", "read"]);
+  assert.equal(piInvocation.childRunId, runId);
 });
 
 test("A harness can accept another prompt after a settled turn", async () => {

@@ -69,13 +69,16 @@ export function createPiAdapter(
       command: "pi",
       args,
       cwd: request.cwd,
-      env: http
-        ? {
-            ...process.env,
-            PI_SUBAGENTS_MCP_URL: http.url,
-            PI_SUBAGENTS_MCP_AUTHORIZATION: http.authorization,
-          }
-        : undefined,
+      env: {
+        ...process.env,
+        PI_SUBAGENTS_RUN_ID: request.runId,
+        ...(http
+          ? {
+              PI_SUBAGENTS_MCP_URL: http.url,
+              PI_SUBAGENTS_MCP_AUTHORIZATION: http.authorization,
+            }
+          : {}),
+      },
     },
     opening: [],
     prompt: (message) => ({
